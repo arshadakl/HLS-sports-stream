@@ -24,23 +24,46 @@ function parseFancodeTime(str) {
   return new Date(`${YYYY}-${MM}-${DD}T${String(hh).padStart(2, '0')}:${mm}:${ss}+05:30`).getTime();
 }
 
-function buildStreamUrl(m, ua) {
-  // Prefer hex-decoded akamai playlist (more stable than dai_url)
-  if (m.akamai_m3u8_hex) {
-    const params = new URLSearchParams({ hex: m.akamai_m3u8_hex });
-    if (ua) params.set('ua', ua);
-    return '/api/proxy?' + params.toString();
-  }
-  if (m.dai_url || m.adfree_url) {
-    const params = new URLSearchParams({ url: m.dai_url || m.adfree_url });
-    if (ua) params.set('ua', ua);
-    return '/api/proxy?' + params.toString();
-  }
-  return null;
+function buildUrlProxy(rawUrl, ua) {
+  if (!rawUrl) return null;
+  const params = new URLSearchParams({ url: rawUrl });
+  if (ua) params.set('ua', ua);
+  return '/api/proxy?' + params.toString();
+}
+
+function buildHexProxy(hex, ua) {
+  if (!hex) return null;
+  const params = new URLSearchParams({ hex });
+  if (ua) params.set('ua', ua);
+  return '/api/proxy?' + params.toString();
+}
+
+function uniqueUrls(urls) {
+  return [...new Set(urls.filter(Boolean))];
+}
+
+function buildFancodeStreamUrls(m, ua) {
+  // Prefer the adaptive Google master, then try the fixed media URL and the
+  // Akamai master. Either CDN can reject a specific edge/region.
+  return uniqueUrls([
+    buildHexProxy(m.google_m3u8_hex, ua),
+    buildUrlProxy(m.dai_url, ua),
+    buildUrlProxy(m.adfree_url, ua),
+    buildHexProxy(m.akamai_m3u8_hex, ua),
+  ]);
+}
+
+function buildSonyLivStreamUrls(m) {
+  return uniqueUrls([
+    buildUrlProxy(m.video_url),
+    buildUrlProxy(m.dai_url),
+    buildUrlProxy(m.pub_url),
+  ]);
 }
 
 function normalizeFancode(m) {
   const ua = m['user-agent'] || DEFAULT_UA;
+  const streamUrls = buildFancodeStreamUrls(m, ua);
   return {
     id: 'fancode:' + m.match_id,
     provider: 'Fancode',
@@ -56,13 +79,13 @@ function normalizeFancode(m) {
     poster: m.src,
     startTime: m.startTime || null,
     startTimeMs: parseFancodeTime(m.startTime),
-    streamUrl: buildStreamUrl(m, ua),
+    streamUrls,
+    streamUrl: streamUrls[0] || null,
   };
 }
 
 function normalizeSonyLiv(m) {
-  const rawStream = m.video_url || m.dai_url || null;
-  const streamUrl = rawStream ? '/api/proxy?url=' + encodeURIComponent(rawStream) : null;
+  const streamUrls = buildSonyLivStreamUrls(m);
   // SonyLiv prefixes event_name with "Upcoming - " or "Live - " sometimes
   let cleanTitle = m.event_name || 'SonyLiv Event';
   cleanTitle = cleanTitle.replace(/^Upcoming\s*-\s*/i, '').replace(/^Live\s*-\s*/i, '');
@@ -81,7 +104,8 @@ function normalizeSonyLiv(m) {
     poster: m.src,
     startTime: null,
     startTimeMs: 0,
-    streamUrl,
+    streamUrls,
+    streamUrl: streamUrls[0] || null,
   };
 }
 
@@ -104,6 +128,7 @@ async function loadMatches() {
 
 let allMatches = [];
 let activeTab = 'live';
+let playbackSession = 0;
 
 function renderCards(matches, grid) {
   grid.innerHTML = '';
@@ -190,7 +215,7 @@ function openPlayer(match) {
   }
 
   message.classList.add('hidden');
-  playHls(video, match.streamUrl);
+  playHls(video, match.streamUrls || [match.streamUrl]);
 }
 
 function isSafari() {
@@ -198,75 +223,120 @@ function isSafari() {
   return /Safari/.test(ua) && !/Chrome|Chromium|Android/.test(ua);
 }
 
-function tryAutoplay(video) {
+function hidePlayerMessage() {
+  document.getElementById('player-message').classList.add('hidden');
+}
+
+function tryAutoplay(video, isCurrent = () => true) {
   const p = video.play();
-  if (p && typeof p.catch === 'function') {
-    p.catch((err) => {
-      // Autoplay blocked (common on iOS Safari). Show a tap-to-play hint.
-      console.warn('[HLS] Autoplay blocked, user gesture required:', err);
-      showPlayerMessage('Tap the play button to start the stream.');
+  if (p && typeof p.then === 'function') {
+    p.then(() => {
+      if (isCurrent()) hidePlayerMessage();
+    }).catch((err) => {
+      if (!isCurrent()) return;
+      if (err && err.name === 'NotAllowedError') {
+        console.warn('[HLS] Autoplay blocked, user gesture required:', err);
+        showPlayerMessage('Tap the play button to start the stream.');
+      } else {
+        console.warn('[HLS] Playback did not start:', err);
+      }
     });
   }
 }
 
-function playHls(video, src) {
+function destroyPlayback(video) {
   if (window.__hls) { window.__hls.destroy(); window.__hls = null; }
-  // Reset video state
-  video.removeAttribute('src');
-  try { video.load(); } catch (e) {}
-
-  // Use native HLS on Safari — it handles m3u8 manifests natively and
-  // does not need hls.js. This is the most reliable path on iOS/macOS.
-  if (video.canPlayType('application/vnd.apple.mpegurl') && (!window.Hls || !window.Hls.isSupported() || isSafari())) {
-    video.src = src;
-    tryAutoplay(video);
-    video.addEventListener('error', () => {
-      const err = video.error;
-      console.error('[HLS] Native video error:', err && err.code);
-      showPlayerMessage('Stream playback error (code ' + (err && err.code) + ')');
-    }, { once: true });
-    return;
+  if (window.__nativeHlsErrorHandler) {
+    video.removeEventListener('error', window.__nativeHlsErrorHandler);
+    window.__nativeHlsErrorHandler = null;
   }
+}
 
-  if (window.Hls && window.Hls.isSupported()) {
-    const hls = new window.Hls({
-      enableWorker: true,
-      lowLatencyMode: false,
-      backBufferLength: 60,
-      maxBufferLength: 30,
-      maxMaxBufferLength: 120,
-      // Some browsers fire recoverable network errors on the first few
-      // segment loads (e.g. Safari with strict cookie/cache policy) — let
-      // hls.js retry by default instead of giving up.
-      fragLoadingMaxRetry: 6,
-      manifestLoadingMaxRetry: 4,
-      levelLoadingMaxRetry: 4,
-    });
-    window.__hls = hls;
-    hls.loadSource(src);
-    hls.attachMedia(video);
-    hls.on(window.Hls.Events.MANIFEST_PARSED, () => tryAutoplay(video));
-    hls.on(window.Hls.Events.ERROR, (_, data) => {
-      console.warn('[HLS] error:', data.type, data.details, data.fatal);
-      if (data.fatal) {
-        switch (data.type) {
-          case window.Hls.ErrorTypes.NETWORK_ERROR:
-            // Try to recover from network errors automatically
-            hls.startLoad();
-            break;
-          case window.Hls.ErrorTypes.MEDIA_ERROR:
-            // Try to recover from media errors
-            hls.recoverMediaError();
-            break;
-          default:
-            showPlayerMessage('Stream playback error: ' + data.details);
-        }
+function playHls(video, rawSources) {
+  const sources = uniqueUrls(Array.isArray(rawSources) ? rawSources : [rawSources]);
+  const sessionId = ++playbackSession;
+  let sourceIndex = 0;
+  let attemptNumber = 0;
+
+  const tryNextSource = (reason) => {
+    if (sessionId !== playbackSession) return;
+    destroyPlayback(video);
+
+    if (sourceIndex >= sources.length) {
+      console.error('[HLS] All stream sources failed:', reason);
+      showPlayerMessage('Unable to play this stream on your device. Please try again later.');
+      return;
+    }
+
+    const src = sources[sourceIndex++];
+    const currentAttempt = ++attemptNumber;
+    const isCurrent = () => sessionId === playbackSession && currentAttempt === attemptNumber;
+    let candidateFailed = false;
+
+    const failCandidate = (failureReason) => {
+      if (!isCurrent() || candidateFailed) return;
+      candidateFailed = true;
+      console.warn('[HLS] Stream source failed:', failureReason);
+      if (sourceIndex < sources.length) {
+        showPlayerMessage('Primary stream unavailable. Trying a backup…');
       }
-    });
-    return;
-  }
+      tryNextSource(failureReason);
+    };
 
-  showPlayerMessage('HLS is not supported in this browser.');
+    video.pause();
+    video.removeAttribute('src');
+    try { video.load(); } catch (e) {}
+
+    // iOS browsers use the native HLS media stack rather than MediaSource.
+    if (video.canPlayType('application/vnd.apple.mpegurl') && (!window.Hls || !window.Hls.isSupported() || isSafari())) {
+      const onNativeError = () => {
+        const errorCode = video.error && video.error.code;
+        failCandidate('native media error ' + (errorCode || 'unknown'));
+      };
+      window.__nativeHlsErrorHandler = onNativeError;
+      video.addEventListener('error', onNativeError, { once: true });
+      video.src = src;
+      try { video.load(); } catch (e) {}
+      tryAutoplay(video, isCurrent);
+      return;
+    }
+
+    if (window.Hls && window.Hls.isSupported()) {
+      let mediaRecoveryAttempts = 0;
+      const hls = new window.Hls({
+        enableWorker: true,
+        lowLatencyMode: false,
+        backBufferLength: 60,
+        maxBufferLength: 30,
+        maxMaxBufferLength: 120,
+        fragLoadingMaxRetry: 6,
+        manifestLoadingMaxRetry: 4,
+        levelLoadingMaxRetry: 4,
+      });
+      window.__hls = hls;
+      hls.on(window.Hls.Events.MEDIA_ATTACHED, () => hls.loadSource(src));
+      hls.on(window.Hls.Events.MANIFEST_PARSED, () => tryAutoplay(video, isCurrent));
+      hls.on(window.Hls.Events.ERROR, (_, data) => {
+        if (!isCurrent()) return;
+        console.warn('[HLS] error:', data.type, data.details, data.fatal);
+        if (!data.fatal) return;
+
+        if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR && mediaRecoveryAttempts < 1) {
+          mediaRecoveryAttempts += 1;
+          hls.recoverMediaError();
+          return;
+        }
+
+        failCandidate(data.details || data.type);
+      });
+      hls.attachMedia(video);
+      return;
+    }
+
+    failCandidate('HLS is not supported in this browser');
+  };
+
+  tryNextSource('initial source');
 }
 
 function showPlayerMessage(msg) {
@@ -316,14 +386,16 @@ function updateTabStyles() {
 }
 
 document.getElementById('close-player').addEventListener('click', () => {
+  playbackSession += 1;
   document.getElementById('player-modal').classList.add('hidden');
   document.getElementById('player-modal').classList.remove('flex');
   document.body.classList.remove('overflow-hidden');
-  if (window.__hls) { window.__hls.destroy(); window.__hls = null; }
   const video = document.getElementById('video');
+  destroyPlayback(video);
   video.pause();
   video.removeAttribute('src');
   video.removeAttribute('poster');
+  hidePlayerMessage();
 });
 
 init();

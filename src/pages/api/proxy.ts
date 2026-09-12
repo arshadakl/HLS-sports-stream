@@ -3,6 +3,14 @@ import type { APIRoute } from 'astro';
 export const prerender = false;
 
 const DEFAULT_UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36';
+const ALLOWED_UPSTREAM_PROTOCOLS = new Set(['http:', 'https:']);
+const MEDIA_RESPONSE_HEADERS = [
+  'Accept-Ranges',
+  'Content-Range',
+  'Content-Length',
+  'ETag',
+  'Last-Modified',
+];
 
 // Build a proxy URL for a given absolute remote URL and UA
 function proxyUrlFor(remoteUrl: string, ua: string): string {
@@ -11,112 +19,176 @@ function proxyUrlFor(remoteUrl: string, ua: string): string {
   return '/api/proxy?' + params.toString();
 }
 
-// Rewrite an m3u8 body: convert every absolute and relative segment/playlist
-// URL into a proxy URL. Uses the provided base (origin + path) to resolve
-// relative URLs.
-function rewriteM3u8(body: string, baseOrigin: string, basePath: string, ua: string): string {
-  const base = baseOrigin + basePath.substring(0, basePath.lastIndexOf('/') + 1);
-  return body.split('\n').map((line) => {
+function resolveHttpUrl(value: string, baseUrl: string): string | null {
+  try {
+    const resolved = new URL(value, baseUrl);
+    return ALLOWED_UPSTREAM_PROTOCOLS.has(resolved.protocol) ? resolved.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+// Rewrite both standalone playlist/segment lines and URI="..." attributes
+// used by keys, init maps, alternate media, and iframe playlists.
+export function rewriteM3u8(body: string, baseUrl: string, ua: string): string {
+  return body.split(/\r?\n/).map((line) => {
     const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) return line;
-    let abs: string;
-    try {
-      abs = trimmed.startsWith('http://') || trimmed.startsWith('https://')
-        ? new URL(trimmed).toString()
-        : new URL(trimmed, base).toString();
-    } catch {
-      return line;
+    if (!trimmed) return line;
+
+    if (trimmed.startsWith('#')) {
+      return line.replace(/URI=(["'])(.*?)\1/gi, (attribute, quote: string, uri: string) => {
+        const absoluteUrl = resolveHttpUrl(uri, baseUrl);
+        return absoluteUrl ? `URI=${quote}${proxyUrlFor(absoluteUrl, ua)}${quote}` : attribute;
+      });
     }
-    return proxyUrlFor(abs, ua);
+
+    const absoluteUrl = resolveHttpUrl(trimmed, baseUrl);
+    return absoluteUrl ? proxyUrlFor(absoluteUrl, ua) : line;
   }).join('\n');
 }
 
+function decodeHex(value: string): string {
+  if (!value || value.length % 2 !== 0 || !/^[0-9a-f]+$/i.test(value)) {
+    throw new Error('Invalid hex');
+  }
+  const bytes = new Uint8Array(value.length / 2);
+  for (let index = 0; index < value.length; index += 2) {
+    bytes[index / 2] = Number.parseInt(value.slice(index, index + 2), 16);
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+function corsHeaders(contentType: string): Headers {
+  return new Headers({
+    'Content-Type': contentType,
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+    'Access-Control-Allow-Headers': 'Accept, Content-Type, Range, If-Range, User-Agent',
+    'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Accept-Ranges, ETag, Last-Modified',
+    'Cache-Control': 'no-cache',
+  });
+}
+
+function upstreamResponseHeaders(resp: Response, contentType: string, copyContentLength = true): Headers {
+  const headers = corsHeaders(contentType);
+  for (const name of MEDIA_RESPONSE_HEADERS) {
+    if (!copyContentLength && name === 'Content-Length') continue;
+    const value = resp.headers.get(name);
+    if (value) headers.set(name, value);
+  }
+  return headers;
+}
+
+function jsonError(message: string, status: number, upstreamStatus?: number): Response {
+  return new Response(JSON.stringify({
+    error: message,
+    ...(upstreamStatus ? { upstreamStatus } : {}),
+  }), {
+    status,
+    headers: corsHeaders('application/json; charset=utf-8'),
+  });
+}
+
 export const OPTIONS: APIRoute = async () => {
-  // Handle CORS preflight requests from Safari/iOS and other browsers
+  const headers = corsHeaders('text/plain');
+  headers.set('Access-Control-Max-Age', '86400');
   return new Response(null, {
     status: 204,
-    headers: {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Range, User-Agent',
-      'Access-Control-Max-Age': '86400',
-    },
+    headers,
   });
 };
 
-export const GET: APIRoute = async ({ url, request }) => {
+const handleRequest: APIRoute = async ({ url, request }) => {
   const target = url.searchParams.get('url');
   const hex = url.searchParams.get('hex');
   const ua = url.searchParams.get('ua') || DEFAULT_UA;
-  // Build an absolute origin from the incoming request so the rewritten
-  // manifest URLs are resolved against the deployed site (handles
-  // http://localhost:4321 in dev and https://<site>.pages.dev in prod).
   const reqOrigin = new URL(request.url).origin;
+  const isHeadRequest = request.method === 'HEAD';
 
   // Mode 1: decode hex m3u8 and serve as rewritten m3u8 manifest
   if (hex) {
     try {
-      const m3u8 = Buffer.from(hex, 'hex').toString('utf-8');
-      // Extract the base origin from the first absolute URL we can find
-      // in the playlist. The akamai_m3u8_hex playlists always contain
-      // absolute URLs to the Akamai CDN.
-      const urlMatch = m3u8.match(/https?:\/\/[^\s"']+/);
-      let baseOrigin: string;
-      let basePath: string;
-      if (urlMatch) {
-        const u = new URL(urlMatch[0]);
-        baseOrigin = u.origin;
-        basePath = u.pathname;
-      } else {
-        // No absolute URLs found — fall back to the request origin
-        baseOrigin = reqOrigin;
-        basePath = '/';
+      const m3u8 = decodeHex(hex);
+      if (!m3u8.trimStart().startsWith('#EXTM3U')) {
+        return jsonError('Decoded content is not a valid HLS manifest', 400);
       }
-      const rewritten = rewriteM3u8(m3u8, baseOrigin, basePath, ua);
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/vnd.apple.mpegurl',
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Range, User-Agent',
-        'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Accept-Ranges',
-        'Cache-Control': 'no-cache',
-      };
-      return new Response(rewritten, { status: 200, headers });
+      const urlMatch = m3u8.match(/https?:\/\/[^\s"']+/);
+      const baseUrl = urlMatch ? new URL(urlMatch[0]).toString() : `${reqOrigin}/`;
+      const rewritten = rewriteM3u8(m3u8, baseUrl, ua);
+      return new Response(isHeadRequest ? null : rewritten, {
+        status: 200,
+        headers: corsHeaders('application/vnd.apple.mpegurl'),
+      });
     } catch {
-      return new Response(JSON.stringify({ error: 'Invalid hex' }), { status: 400 });
+      return jsonError('Invalid hex-encoded HLS manifest', 400);
     }
   }
 
   // Mode 2: proxy a remote URL
   if (!target) {
-    return new Response(JSON.stringify({ error: 'Missing url or hex param' }), { status: 400 });
+    return jsonError('Missing url or hex param', 400);
   }
 
   let remoteUrl: URL;
   try {
     remoteUrl = new URL(target);
+    if (!ALLOWED_UPSTREAM_PROTOCOLS.has(remoteUrl.protocol)) throw new Error('Unsupported protocol');
   } catch {
-    return new Response(JSON.stringify({ error: 'Invalid url' }), { status: 400 });
+    return jsonError('Invalid or unsupported url', 400);
   }
 
-  const resp = await fetch(remoteUrl.toString(), {
-    headers: { 'User-Agent': ua },
-  });
+  const upstreamHeaders = new Headers({ 'User-Agent': ua });
+  for (const name of ['Accept', 'Range', 'If-Range']) {
+    const value = request.headers.get(name);
+    if (value) upstreamHeaders.set(name, value);
+  }
+
+  let resp: Response;
+  try {
+    resp = await fetch(remoteUrl.toString(), {
+      method: isHeadRequest ? 'HEAD' : 'GET',
+      headers: upstreamHeaders,
+      redirect: 'follow',
+    });
+  } catch {
+    return jsonError('Unable to reach the upstream stream', 502);
+  }
 
   const contentType = resp.headers.get('content-type') || 'application/octet-stream';
-  const headers: Record<string, string> = {
-    'Content-Type': contentType,
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Range, User-Agent',
-    'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Accept-Ranges',
-    'Cache-Control': 'no-cache',
-  };
+  const isManifest = contentType.toLowerCase().includes('mpegurl')
+    || remoteUrl.pathname.toLowerCase().endsWith('.m3u8');
 
-  if (contentType.includes('mpegurl') || contentType.includes('m3u8') || target.endsWith('.m3u8')) {
-    const body = await resp.text();
-    return new Response(rewriteM3u8(body, remoteUrl.origin, remoteUrl.pathname, ua), { status: resp.status, headers });
+  if (!resp.ok) {
+    const headers = upstreamResponseHeaders(resp, 'application/json; charset=utf-8', false);
+    return new Response(JSON.stringify({
+      error: 'Upstream stream request failed',
+      upstreamStatus: resp.status,
+    }), { status: resp.status, headers });
   }
 
-  return new Response(resp.body, { status: resp.status, headers });
+  if (isHeadRequest) {
+    return new Response(null, {
+      status: resp.status,
+      headers: upstreamResponseHeaders(resp, contentType),
+    });
+  }
+
+  if (isManifest) {
+    const body = await resp.text();
+    if (!body.trimStart().startsWith('#EXTM3U')) {
+      return jsonError('Upstream did not return a valid HLS manifest', 502, resp.status);
+    }
+    return new Response(rewriteM3u8(body, remoteUrl.toString(), ua), {
+      status: resp.status,
+      headers: upstreamResponseHeaders(resp, 'application/vnd.apple.mpegurl', false),
+    });
+  }
+
+  return new Response(resp.body, {
+    status: resp.status,
+    headers: upstreamResponseHeaders(resp, contentType),
+  });
 };
+
+export const GET = handleRequest;
+export const HEAD = handleRequest;
