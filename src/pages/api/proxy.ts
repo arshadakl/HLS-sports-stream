@@ -138,7 +138,7 @@ const handleRequest: APIRoute = async ({ url, request }) => {
   }
 
   const upstreamHeaders = new Headers({ 'User-Agent': ua });
-  for (const name of ['Accept', 'Range', 'If-Range']) {
+  for (const name of ['Accept', 'Range', 'If-Range', 'Origin']) {
     const value = request.headers.get(name);
     if (value) upstreamHeaders.set(name, value);
   }

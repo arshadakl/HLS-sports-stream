@@ -10,6 +10,14 @@ const isMobileUA = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent || 
 const isLowEndDevice = (navigator.hardwareConcurrency || 4) <= 4;
 const saveDataEnabled = !!(navigator.connection && navigator.connection.saveData);
 
+const NATIVE_ERROR_MAP = {
+  1: 'Playback aborted',
+  2: 'Network error — stream unreachable',
+  3: 'Decode error — format unsupported',
+  4: 'Source not supported on this device',
+};
+const NATIVE_RETRY_DELAY_MS = 1500;
+
 async function fetchJson(url) {
   try {
     const res = await fetch(url, { cache: 'no-store' });
@@ -149,13 +157,12 @@ function normalizeSonyLiv(m) {
 }
 
 async function loadMatches() {
-  const [fancode, sonyliv] = await Promise.all([
-    fetchJson(FANCODE_URL),
-    fetchJson(SONYLIV_URL),
-  ]);
+  const fancode = await fetchJson(FANCODE_URL);
+  // SonyLiv temporarily hidden — re-enable by uncommenting below:
+  // const sonyliv = await fetchJson(SONYLIV_URL);
   const matches = [
     ...fancode.map(normalizeFancode),
-    ...sonyliv.map(normalizeSonyLiv),
+    // ...sonyliv.map(normalizeSonyLiv),
   ];
   matches.sort((a, b) => {
     if (a.isLive !== b.isLive) return a.isLive ? -1 : 1;
@@ -344,7 +351,7 @@ function playHls(video, rawSources) {
       if (sourceIndex < sources.length) {
         showPlayerMessage('Primary stream unavailable. Trying a backup…');
       }
-      tryNextSource(failureReason);
+      setTimeout(() => tryNextSource(failureReason), NATIVE_RETRY_DELAY_MS);
     };
 
     video.pause();
@@ -355,13 +362,14 @@ function playHls(video, rawSources) {
     if (video.canPlayType('application/vnd.apple.mpegurl') && (!window.Hls || !window.Hls.isSupported() || isSafari())) {
       const onNativeError = () => {
         const errorCode = video.error && video.error.code;
-        failCandidate('native media error ' + (errorCode || 'unknown'));
+        const msg = NATIVE_ERROR_MAP[errorCode] || ('native media error ' + (errorCode || 'unknown'));
+        failCandidate(msg);
       };
       window.__nativeHlsErrorHandler = onNativeError;
       video.addEventListener('error', onNativeError, { once: true });
+      video.addEventListener('canplay', () => tryAutoplay(video, isCurrent), { once: true });
       video.src = src;
       try { video.load(); } catch (e) {}
-      tryAutoplay(video, isCurrent);
       return;
     }
 
