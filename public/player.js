@@ -278,6 +278,10 @@ function openPlayer(match) {
   const title = document.getElementById('player-title');
   const message = document.getElementById('player-message');
 
+  // Hard reset: kill any old playback and clear buffers so the previous
+  // stream's segments/poster don't flash when opening a new match.
+  resetVideo(video);
+
   title.textContent = match.title;
   modal.classList.remove('hidden');
   modal.classList.add('flex');
@@ -285,8 +289,6 @@ function openPlayer(match) {
 
   if (match.poster) {
     video.poster = match.poster;
-  } else {
-    video.removeAttribute('poster');
   }
 
   if (!match.streamUrl) {
@@ -331,6 +333,16 @@ function destroyPlayback(video) {
     video.removeEventListener('error', window.__nativeHlsErrorHandler);
     window.__nativeHlsErrorHandler = null;
   }
+}
+
+function resetVideo(video) {
+  playbackSession += 1;
+  destroyPlayback(video);
+  video.pause();
+  video.removeAttribute('src');
+  video.removeAttribute('poster');
+  try { video.load(); } catch (e) {}
+  hidePlayerMessage();
 }
 
 function playHls(video, rawSources) {
@@ -495,16 +507,10 @@ function updateTabStyles() {
 }
 
 document.getElementById('close-player').addEventListener('click', () => {
-  playbackSession += 1;
   document.getElementById('player-modal').classList.add('hidden');
   document.getElementById('player-modal').classList.remove('flex');
   document.body.classList.remove('overflow-hidden');
-  const video = document.getElementById('video');
-  destroyPlayback(video);
-  video.pause();
-  video.removeAttribute('src');
-  video.removeAttribute('poster');
-  hidePlayerMessage();
+  resetVideo(document.getElementById('video'));
 });
 
 init();
