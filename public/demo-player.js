@@ -56,15 +56,18 @@ function openPlayer(match) {
 }
 
 function playHls(video, src) {
+  if (window.__hls) { window.__hls.destroy(); window.__hls = null; }
+  const proxySrc = '/api/proxy?url=' + encodeURIComponent(src);
+
   if (window.Hls && window.Hls.isSupported()) {
     const hls = new window.Hls();
     if (window.__hls) window.__hls.destroy();
     window.__hls = hls;
-    hls.loadSource(src);
+    hls.loadSource(proxySrc);
     hls.attachMedia(video);
     hls.on(window.Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
   } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-    video.src = src;
+    video.src = proxySrc;
     video.play().catch(() => {});
   }
 }
