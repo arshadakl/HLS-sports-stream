@@ -193,27 +193,80 @@ function openPlayer(match) {
   playHls(video, match.streamUrl);
 }
 
+function isSafari() {
+  const ua = navigator.userAgent;
+  return /Safari/.test(ua) && !/Chrome|Chromium|Android/.test(ua);
+}
+
+function tryAutoplay(video) {
+  const p = video.play();
+  if (p && typeof p.catch === 'function') {
+    p.catch((err) => {
+      // Autoplay blocked (common on iOS Safari). Show a tap-to-play hint.
+      console.warn('[HLS] Autoplay blocked, user gesture required:', err);
+      showPlayerMessage('Tap the play button to start the stream.');
+    });
+  }
+}
+
 function playHls(video, src) {
   if (window.__hls) { window.__hls.destroy(); window.__hls = null; }
+  // Reset video state
+  video.removeAttribute('src');
+  try { video.load(); } catch (e) {}
+
+  // Use native HLS on Safari — it handles m3u8 manifests natively and
+  // does not need hls.js. This is the most reliable path on iOS/macOS.
+  if (video.canPlayType('application/vnd.apple.mpegurl') && (!window.Hls || !window.Hls.isSupported() || isSafari())) {
+    video.src = src;
+    tryAutoplay(video);
+    video.addEventListener('error', () => {
+      const err = video.error;
+      console.error('[HLS] Native video error:', err && err.code);
+      showPlayerMessage('Stream playback error (code ' + (err && err.code) + ')');
+    }, { once: true });
+    return;
+  }
 
   if (window.Hls && window.Hls.isSupported()) {
-    const hls = new window.Hls();
+    const hls = new window.Hls({
+      enableWorker: true,
+      lowLatencyMode: false,
+      backBufferLength: 60,
+      maxBufferLength: 30,
+      maxMaxBufferLength: 120,
+      // Some browsers fire recoverable network errors on the first few
+      // segment loads (e.g. Safari with strict cookie/cache policy) — let
+      // hls.js retry by default instead of giving up.
+      fragLoadingMaxRetry: 6,
+      manifestLoadingMaxRetry: 4,
+      levelLoadingMaxRetry: 4,
+    });
     window.__hls = hls;
     hls.loadSource(src);
     hls.attachMedia(video);
-    hls.on(window.Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
+    hls.on(window.Hls.Events.MANIFEST_PARSED, () => tryAutoplay(video));
     hls.on(window.Hls.Events.ERROR, (_, data) => {
+      console.warn('[HLS] error:', data.type, data.details, data.fatal);
       if (data.fatal) {
-        console.error('[HLS] Fatal error:', data.type, data.details);
-        showPlayerMessage('Stream playback error: ' + data.details);
+        switch (data.type) {
+          case window.Hls.ErrorTypes.NETWORK_ERROR:
+            // Try to recover from network errors automatically
+            hls.startLoad();
+            break;
+          case window.Hls.ErrorTypes.MEDIA_ERROR:
+            // Try to recover from media errors
+            hls.recoverMediaError();
+            break;
+          default:
+            showPlayerMessage('Stream playback error: ' + data.details);
+        }
       }
     });
-  } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-    video.src = src;
-    video.play().catch((e) => console.error('[HLS] Playback failed:', e));
-  } else {
-    showPlayerMessage('HLS is not supported in this browser.');
+    return;
   }
+
+  showPlayerMessage('HLS is not supported in this browser.');
 }
 
 function showPlayerMessage(msg) {

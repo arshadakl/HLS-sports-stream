@@ -31,6 +31,19 @@ function rewriteM3u8(body: string, baseOrigin: string, basePath: string, ua: str
   }).join('\n');
 }
 
+export const OPTIONS: APIRoute = async () => {
+  // Handle CORS preflight requests from Safari/iOS and other browsers
+  return new Response(null, {
+    status: 204,
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Range, User-Agent',
+      'Access-Control-Max-Age': '86400',
+    },
+  });
+};
+
 export const GET: APIRoute = async ({ url, request }) => {
   const target = url.searchParams.get('url');
   const hex = url.searchParams.get('hex');
@@ -63,6 +76,9 @@ export const GET: APIRoute = async ({ url, request }) => {
       const headers: Record<string, string> = {
         'Content-Type': 'application/vnd.apple.mpegurl',
         'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Range, User-Agent',
+        'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Accept-Ranges',
         'Cache-Control': 'no-cache',
       };
       return new Response(rewritten, { status: 200, headers });
@@ -91,6 +107,9 @@ export const GET: APIRoute = async ({ url, request }) => {
   const headers: Record<string, string> = {
     'Content-Type': contentType,
     'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Range, User-Agent',
+    'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Accept-Ranges',
     'Cache-Control': 'no-cache',
   };
 
