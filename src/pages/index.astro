@@ -4,14 +4,31 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="referrer" content="no-referrer" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' https: data:; media-src 'self' blob:; connect-src 'self' https://raw.githubusercontent.com; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self';" />
+  <meta name="description" content="Watch live sports matches — Cricket, Football, F1, MotoGP and more. Real-time streaming." />
+  <meta property="og:title" content="sportlive — Live Sports Streaming" />
+  <meta property="og:description" content="Watch live sports matches in real time. Cricket, Football, F1, MotoGP and more." />
+  <meta property="og:type" content="website" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="theme-color" content="#050811" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E&#x26BD;%3C/text%3E%3C/svg%3E" />
   <title>sportlive — Live Matches</title>
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13"></script>
   <style is:global>
     .bg-stadium {
       background-image:
         radial-gradient(ellipse 80% 50% at 90% 30%, rgba(239, 68, 68, 0.15), transparent 50%),
         radial-gradient(ellipse 60% 50% at 10% 80%, rgba(239, 68, 68, 0.08), transparent 50%),
         linear-gradient(180deg, #050811 0%, #0a0f1a 100%);
+    }
+    @keyframes shimmer {
+      0% { background-position: -200% 0; }
+      100% { background-position: 200% 0; }
+    }
+    .skeleton {
+      background: linear-gradient(90deg, rgba(255,255,255,0.03) 25%, rgba(255,255,255,0.08) 50%, rgba(255,255,255,0.03) 75%);
+      background-size: 200% 100%;
+      animation: shimmer 1.5s infinite;
     }
     .glass {
       background: rgba(10, 15, 26, 0.55);
@@ -41,6 +58,15 @@
   </style>
 </head>
 <body class="min-h-screen bg-stadium text-foreground font-sans antialiased overflow-x-hidden">
+  <noscript>
+    <div class="fixed inset-0 z-[100] bg-black/95 flex items-center justify-center p-8">
+      <div class="text-center space-y-4 max-w-md">
+        <p class="text-2xl font-bold text-white">JavaScript Required</p>
+        <p class="text-muted-foreground">This app requires JavaScript to fetch and display live sports streams. Please enable JavaScript in your browser settings.</p>
+      </div>
+    </div>
+  </noscript>
+
   <!-- Header (sticky, glassmorphism) -->
   <header class="sticky top-0 z-40 glass">
     <div class="mx-auto max-w-[1200px] px-4 sm:px-6 lg:px-8 h-16 relative flex items-center justify-end sm:justify-between">
@@ -117,7 +143,7 @@
           Close
         </button>
       </div>
-      <video id="video" class="aspect-video w-full rounded-lg bg-black" controls muted playsinline crossorigin="anonymous" referrerpolicy="no-referrer" preload="auto" disablepictureinpicture></video>
+      <video id="video" class="aspect-video w-full rounded-lg bg-black" controls muted playsinline crossorigin="anonymous" referrerpolicy="no-referrer" preload="auto"></video>
       <div id="player-message" class="hidden mt-3 text-center text-sm text-muted-foreground">
         No stream available for this event.
       </div>

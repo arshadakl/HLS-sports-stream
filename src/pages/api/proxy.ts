@@ -58,10 +58,17 @@ function decodeHex(value: string): string {
   return new TextDecoder().decode(bytes);
 }
 
-function corsHeaders(contentType: string): Headers {
+const ALLOWED_ORIGINS = new Set([
+  'https://hls-sports-stream.pages.dev',
+  'http://localhost:4321',
+  'http://localhost:3000',
+]);
+
+function corsHeaders(contentType: string, requestOrigin?: string | null): Headers {
+  const origin = requestOrigin && ALLOWED_ORIGINS.has(requestOrigin) ? requestOrigin : null;
   return new Headers({
     'Content-Type': contentType,
-    'Access-Control-Allow-Origin': '*',
+    ...(origin ? { 'Access-Control-Allow-Origin': origin } : {}),
     'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
     'Access-Control-Allow-Headers': 'Accept, Content-Type, Range, If-Range, User-Agent',
     'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Accept-Ranges, ETag, Last-Modified',
@@ -69,8 +76,8 @@ function corsHeaders(contentType: string): Headers {
   });
 }
 
-function upstreamResponseHeaders(resp: Response, contentType: string, copyContentLength = true): Headers {
-  const headers = corsHeaders(contentType);
+function upstreamResponseHeaders(resp: Response, contentType: string, copyContentLength = true, requestOrigin?: string | null): Headers {
+  const headers = corsHeaders(contentType, requestOrigin);
   for (const name of MEDIA_RESPONSE_HEADERS) {
     if (!copyContentLength && name === 'Content-Length') continue;
     const value = resp.headers.get(name);
@@ -79,18 +86,18 @@ function upstreamResponseHeaders(resp: Response, contentType: string, copyConten
   return headers;
 }
 
-function jsonError(message: string, status: number, upstreamStatus?: number): Response {
+function jsonError(message: string, status: number, upstreamStatus?: number, requestOrigin?: string | null): Response {
   return new Response(JSON.stringify({
     error: message,
     ...(upstreamStatus ? { upstreamStatus } : {}),
   }), {
     status,
-    headers: corsHeaders('application/json; charset=utf-8'),
+    headers: corsHeaders('application/json; charset=utf-8', requestOrigin),
   });
 }
 
-export const OPTIONS: APIRoute = async () => {
-  const headers = corsHeaders('text/plain');
+export const OPTIONS: APIRoute = async ({ request }) => {
+  const headers = corsHeaders('text/plain', request.headers.get('origin'));
   headers.set('Access-Control-Max-Age', '86400');
   return new Response(null, {
     status: 204,
@@ -103,6 +110,7 @@ const handleRequest: APIRoute = async ({ url, request }) => {
   const hex = url.searchParams.get('hex');
   const ua = url.searchParams.get('ua') || DEFAULT_UA;
   const reqOrigin = new URL(request.url).origin;
+  const requestOrigin = request.headers.get('origin');
   const isHeadRequest = request.method === 'HEAD';
 
   // Mode 1: decode hex m3u8 and serve as rewritten m3u8 manifest
@@ -110,23 +118,23 @@ const handleRequest: APIRoute = async ({ url, request }) => {
     try {
       const m3u8 = decodeHex(hex);
       if (!m3u8.trimStart().startsWith('#EXTM3U')) {
-        return jsonError('Decoded content is not a valid HLS manifest', 400);
+        return jsonError('Decoded content is not a valid HLS manifest', 400, undefined, requestOrigin);
       }
       const urlMatch = m3u8.match(/https?:\/\/[^\s"']+/);
       const baseUrl = urlMatch ? new URL(urlMatch[0]).toString() : `${reqOrigin}/`;
       const rewritten = rewriteM3u8(m3u8, baseUrl, ua);
       return new Response(isHeadRequest ? null : rewritten, {
         status: 200,
-        headers: corsHeaders('application/vnd.apple.mpegurl'),
+        headers: corsHeaders('application/vnd.apple.mpegurl', requestOrigin),
       });
     } catch {
-      return jsonError('Invalid hex-encoded HLS manifest', 400);
+      return jsonError('Invalid hex-encoded HLS manifest', 400, undefined, requestOrigin);
     }
   }
 
   // Mode 2: proxy a remote URL
   if (!target) {
-    return jsonError('Missing url or hex param', 400);
+    return jsonError('Missing url or hex param', 400, undefined, requestOrigin);
   }
 
   let remoteUrl: URL;
@@ -134,7 +142,7 @@ const handleRequest: APIRoute = async ({ url, request }) => {
     remoteUrl = new URL(target);
     if (!ALLOWED_UPSTREAM_PROTOCOLS.has(remoteUrl.protocol)) throw new Error('Unsupported protocol');
   } catch {
-    return jsonError('Invalid or unsupported url', 400);
+    return jsonError('Invalid or unsupported url', 400, undefined, requestOrigin);
   }
 
   const upstreamHeaders = new Headers({ 'User-Agent': ua });
@@ -151,7 +159,7 @@ const handleRequest: APIRoute = async ({ url, request }) => {
       redirect: 'follow',
     });
   } catch {
-    return jsonError('Unable to reach the upstream stream', 502);
+    return jsonError('Unable to reach the upstream stream', 502, undefined, requestOrigin);
   }
 
   const contentType = resp.headers.get('content-type') || 'application/octet-stream';
@@ -159,7 +167,7 @@ const handleRequest: APIRoute = async ({ url, request }) => {
     || remoteUrl.pathname.toLowerCase().endsWith('.m3u8');
 
   if (!resp.ok) {
-    const headers = upstreamResponseHeaders(resp, 'application/json; charset=utf-8', false);
+    const headers = upstreamResponseHeaders(resp, 'application/json; charset=utf-8', false, requestOrigin);
     return new Response(JSON.stringify({
       error: 'Upstream stream request failed',
       upstreamStatus: resp.status,
@@ -169,24 +177,24 @@ const handleRequest: APIRoute = async ({ url, request }) => {
   if (isHeadRequest) {
     return new Response(null, {
       status: resp.status,
-      headers: upstreamResponseHeaders(resp, contentType),
+      headers: upstreamResponseHeaders(resp, contentType, true, requestOrigin),
     });
   }
 
   if (isManifest) {
     const body = await resp.text();
     if (!body.trimStart().startsWith('#EXTM3U')) {
-      return jsonError('Upstream did not return a valid HLS manifest', 502, resp.status);
+      return jsonError('Upstream did not return a valid HLS manifest', 502, resp.status, requestOrigin);
     }
     return new Response(rewriteM3u8(body, remoteUrl.toString(), ua), {
       status: resp.status,
-      headers: upstreamResponseHeaders(resp, 'application/vnd.apple.mpegurl', false),
+      headers: upstreamResponseHeaders(resp, 'application/vnd.apple.mpegurl', false, requestOrigin),
     });
   }
 
   return new Response(resp.body, {
     status: resp.status,
-    headers: upstreamResponseHeaders(resp, contentType),
+    headers: upstreamResponseHeaders(resp, contentType, true, requestOrigin),
   });
 };
 

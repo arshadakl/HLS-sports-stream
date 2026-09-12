@@ -5,6 +5,9 @@ const DEFAULT_UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, l
 const LIVE_WINDOW_BEFORE_START_MS = 15 * 60 * 1000;
 const LIVE_WINDOW_AFTER_START_MS = 6 * 60 * 60 * 1000;
 const LIVE_POLL_INTERVAL_MS = 60 * 1000;
+const FETCH_TIMEOUT_MS = 15_000;
+const MAX_FETCH_RETRIES = 2;
+const NATIVE_RETRY_DELAY_MS = 1500;
 
 const isMobileUA = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '');
 const isLowEndDevice = (navigator.hardwareConcurrency || 4) <= 4;
@@ -16,18 +19,66 @@ const NATIVE_ERROR_MAP = {
   3: 'Decode error — format unsupported',
   4: 'Source not supported on this device',
 };
-const NATIVE_RETRY_DELAY_MS = 1500;
 
-async function fetchJson(url) {
+/* ─── Utils ─── */
+
+function el(tag, className, text) {
+  const e = document.createElement(tag);
+  if (className) e.className = className;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function svgIconCalendar() {
+  const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  s.setAttribute('class', 'h-3 w-3');
+  s.setAttribute('viewBox', '0 0 24 24');
+  s.setAttribute('fill', 'none');
+  s.setAttribute('stroke', 'currentColor');
+  s.setAttribute('stroke-width', '2');
+  s.innerHTML = '<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>';
+  return s;
+}
+
+function debounce(fn, ms) {
+  let t;
+  return (...args) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...args), ms);
+  };
+}
+
+/* ─── Network ─── */
+
+async function fetchWithTimeout(url, opts = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch(url, { cache: 'no-store' });
-    if (!res.ok) return [];
+    const res = await fetch(url, { ...opts, signal: controller.signal });
+    return res;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchJson(url, attempt = 0) {
+  try {
+    const res = await fetchWithTimeout(url, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     return Array.isArray(data.matches) ? data.matches : [];
-  } catch {
+  } catch (err) {
+    if (attempt < MAX_FETCH_RETRIES) {
+      const delay = 1000 * Math.pow(2, attempt);
+      await new Promise(r => setTimeout(r, delay));
+      return fetchJson(url, attempt + 1);
+    }
+    console.error('[fetchJson] Failed after retries:', url, err);
     return [];
   }
 }
+
+/* ─── Time / Live Logic ─── */
 
 function parseFancodeTime(str) {
   if (!str) return 0;
@@ -37,6 +88,7 @@ function parseFancodeTime(str) {
   hh = parseInt(hh, 10);
   if (ampm.toUpperCase() === 'PM' && hh < 12) hh += 12;
   if (ampm.toUpperCase() === 'AM' && hh === 12) hh = 0;
+  // Parse as IST (+05:30) since the upstream format uses IST
   return new Date(`${YYYY}-${MM}-${DD}T${String(hh).padStart(2, '0')}:${mm}:${ss}+05:30`).getTime();
 }
 
@@ -59,6 +111,8 @@ function computeIsLive({ provider, startTimeMs, upstreamStatus, upstreamIsLive }
   return upstreamIsLive === true;
 }
 
+/* ─── Proxy Builders ─── */
+
 function buildUrlProxy(rawUrl, ua) {
   if (!rawUrl) return null;
   const params = new URLSearchParams({ url: rawUrl });
@@ -77,9 +131,9 @@ function uniqueUrls(urls) {
   return [...new Set(urls.filter(Boolean))];
 }
 
+/* ─── Normalizers ─── */
+
 function buildFancodeStreamUrls(m, ua) {
-  // Prefer the adaptive Google master, then try the fixed media URL and the
-  // Akamai master. Either CDN can reject a specific edge/region.
   return uniqueUrls([
     buildHexProxy(m.google_m3u8_hex, ua),
     buildUrlProxy(m.dai_url, ua),
@@ -156,6 +210,17 @@ function normalizeSonyLiv(m) {
   };
 }
 
+/* ─── State ─── */
+
+let allMatches = [];
+let activeTab = 'live';
+let playbackSession = 0;
+let isLoadingStream = false;
+let pollIntervalId = null;
+let isPageVisible = true;
+
+/* ─── Data Loading ─── */
+
 async function loadMatches() {
   const fancode = await fetchJson(FANCODE_URL);
   // SonyLiv temporarily hidden — re-enable by uncommenting below:
@@ -197,60 +262,111 @@ function refreshLiveness(matches) {
   return changed;
 }
 
-let allMatches = [];
-let activeTab = 'live';
-let playbackSession = 0;
+/* ─── Rendering (XSS-safe) ─── */
+
+function renderBadge(text, classes) {
+  const span = el('span', `rounded-md px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${classes}`);
+  span.textContent = text;
+  return span;
+}
+
+function renderCard(m) {
+  const card = el('button', 'card');
+  card.type = 'button';
+  card.dataset.matchId = m.id;
+  card.setAttribute('aria-label', `Watch ${m.title}`);
+
+  // Image container
+  const imgWrap = el('div', 'relative w-full overflow-hidden');
+
+  if (m.poster) {
+    const img = el('img', 'block w-full aspect-video object-cover');
+    img.src = m.poster;
+    img.alt = '';
+    img.loading = 'lazy';
+    img.onerror = () => { img.style.display = 'none'; };
+    imgWrap.appendChild(img);
+  } else {
+    const placeholder = el('div', 'block w-full aspect-video bg-muted');
+    imgWrap.appendChild(placeholder);
+  }
+
+  // Overlays
+  const overlay = el('div', 'absolute inset-x-0 top-0 flex items-start justify-between p-2.5 pointer-events-none');
+  const left = el('div', 'flex items-center gap-1.5');
+
+  if (m.isLive) {
+    const liveBadge = renderBadge('Live', 'bg-primary text-white');
+    const dot = el('span', 'h-1.5 w-1.5 rounded-full bg-white animate-pulse');
+    liveBadge.prepend(dot);
+    left.appendChild(liveBadge);
+  } else {
+    left.appendChild(renderBadge('Upcoming', 'bg-black/70 text-slate-200 backdrop-blur-sm'));
+  }
+
+  if (m.category) {
+    left.appendChild(renderBadge(m.category, 'bg-black/70 text-slate-200 backdrop-blur-sm font-semibold'));
+  }
+
+  const right = el('div', 'flex items-center gap-1.5');
+  const providerColor = m.provider === 'Fancode' ? 'bg-blue-600/90' : 'bg-purple-600/90';
+  right.appendChild(renderBadge(m.provider, `${providerColor} text-white backdrop-blur-sm`));
+  if (m.streamUrl) {
+    right.appendChild(renderBadge('Stream 1', 'bg-black/70 text-slate-100 backdrop-blur-sm font-semibold'));
+  }
+
+  overlay.appendChild(left);
+  overlay.appendChild(right);
+  imgWrap.appendChild(overlay);
+  card.appendChild(imgWrap);
+
+  // Body
+  const body = el('div', 'px-4 py-4 space-y-2');
+
+  const title = el('p', 'text-[14px] font-bold leading-snug text-foreground line-clamp-2');
+  title.textContent = m.title;
+  body.appendChild(title);
+
+  const subtitle = el('p', 'text-sm text-muted-foreground');
+  subtitle.textContent = (m.team1 && m.team2) ? `${m.team1} vs ${m.team2}` : (m.channel || m.competition);
+  body.appendChild(subtitle);
+
+  const footer = el('div', 'flex items-center justify-between pt-1');
+  const timeWrap = el('span', 'inline-flex items-center gap-1.5 text-[11px] text-muted-foreground/80');
+  timeWrap.appendChild(svgIconCalendar());
+  timeWrap.appendChild(document.createTextNode(m.startTime || (m.isLive ? 'Now' : 'TBA')));
+  footer.appendChild(timeWrap);
+
+  if (m.streamUrl) {
+    const watch = el('span', 'inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-semibold text-white');
+    watch.textContent = '▶ Watch';
+    footer.appendChild(watch);
+  } else {
+    const soon = el('span', 'text-[11px] font-medium text-yellow-500');
+    soon.textContent = 'Coming Soon';
+    footer.appendChild(soon);
+  }
+
+  body.appendChild(footer);
+  card.appendChild(body);
+
+  return card;
+}
 
 function renderCards(matches, grid) {
   grid.innerHTML = '';
   if (!matches || matches.length === 0) {
-    grid.innerHTML = '<p class="col-span-full text-center text-sm text-muted-foreground py-16">No events in this category.</p>';
+    const empty = el('p', 'col-span-full text-center text-sm text-muted-foreground py-16');
+    empty.textContent = 'No events in this category.';
+    grid.appendChild(empty);
     return;
   }
+
+  const frag = document.createDocumentFragment();
   for (const m of matches) {
-    const card = document.createElement('button');
-    card.type = 'button';
-    card.className = 'card';
-    const providerColor = m.provider === 'Fancode' ? 'bg-blue-600/90' : 'bg-purple-600/90';
-    card.innerHTML = `
-      <div class="relative w-full overflow-hidden">
-        ${m.poster
-          ? `<img src="${m.poster}" alt="" loading="lazy" class="block w-full aspect-video object-cover" />`
-          : '<div class="block w-full aspect-video bg-muted"></div>'}
-        <div class="absolute inset-x-0 top-0 flex items-start justify-between p-2.5 pointer-events-none">
-          <div class="flex items-center gap-1.5">
-            ${m.isLive
-              ? `<span class="inline-flex items-center gap-1 rounded-md bg-primary px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white">
-                  <span class="h-1.5 w-1.5 rounded-full bg-white animate-pulse-dot"></span>
-                  Live
-                </span>`
-              : `<span class="rounded-md bg-black/70 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-slate-200 backdrop-blur-sm">Upcoming</span>`}
-            ${m.category ? `<span class="rounded-md bg-black/70 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-200 backdrop-blur-sm">${m.category}</span>` : ''}
-          </div>
-          <div class="flex items-center gap-1.5">
-            <span class="rounded-md ${providerColor} px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white backdrop-blur-sm">${m.provider}</span>
-            ${m.streamUrl ? '<span class="rounded-md bg-black/70 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-100 backdrop-blur-sm">Stream 1</span>' : ''}
-          </div>
-        </div>
-      </div>
-      <div class="px-4 py-4 space-y-2">
-        <p class="text-[14px] font-bold leading-snug text-foreground line-clamp-2">${m.title}</p>
-        <p class="text-sm text-muted-foreground">
-          ${m.team1 && m.team2 ? `${m.team1} vs ${m.team2}` : (m.channel ? m.channel : m.competition)}
-        </p>
-        <div class="flex items-center justify-between pt-1">
-          <span class="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground/80">
-            <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
-            ${m.startTime || (m.isLive ? 'Now' : 'TBA')}
-          </span>
-          ${m.streamUrl
-            ? `<span class="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-semibold text-white">▶ Watch</span>`
-            : `<span class="text-[11px] font-medium text-yellow-500">Coming Soon</span>`}
-        </div>
-      </div>`;
-    card.addEventListener('click', () => openPlayer(m));
-    grid.appendChild(card);
+    frag.appendChild(renderCard(m));
   }
+  grid.appendChild(frag);
 }
 
 function filterAndRender() {
@@ -265,21 +381,24 @@ function filterAndRender() {
     filtered.sort((a, b) => {
       const aF = isFootball(a) ? 1 : 0;
       const bF = isFootball(b) ? 1 : 0;
-      if (aF !== bF) return bF - aF; // football first
+      if (aF !== bF) return bF - aF;
       return 0;
     });
   }
   renderCards(filtered, grid);
 }
 
+/* ─── Player ─── */
+
 function openPlayer(match) {
+  if (isLoadingStream) return;
+  isLoadingStream = true;
+
   const modal = document.getElementById('player-modal');
   const video = document.getElementById('video');
   const title = document.getElementById('player-title');
   const message = document.getElementById('player-message');
 
-  // Hard reset: kill any old playback and clear buffers so the previous
-  // stream's segments/poster don't flash when opening a new match.
   resetVideo(video);
 
   title.textContent = match.title;
@@ -294,11 +413,23 @@ function openPlayer(match) {
   if (!match.streamUrl) {
     message.textContent = 'Stream not yet available for this event.';
     message.classList.remove('hidden');
+    isLoadingStream = false;
     return;
   }
 
   message.classList.add('hidden');
-  playHls(video, match.streamUrls || [match.streamUrl]);
+  playHls(video, match.streamUrls || [match.streamUrl], () => {
+    isLoadingStream = false;
+  });
+}
+
+function closePlayer() {
+  const modal = document.getElementById('player-modal');
+  modal.classList.add('hidden');
+  modal.classList.remove('flex');
+  document.body.classList.remove('overflow-hidden');
+  resetVideo(document.getElementById('video'));
+  isLoadingStream = false;
 }
 
 function isSafari() {
@@ -308,6 +439,12 @@ function isSafari() {
 
 function hidePlayerMessage() {
   document.getElementById('player-message').classList.add('hidden');
+}
+
+function showPlayerMessage(msg) {
+  const el = document.getElementById('player-message');
+  el.textContent = msg;
+  el.classList.remove('hidden');
 }
 
 function tryAutoplay(video, isCurrent = () => true) {
@@ -345,19 +482,23 @@ function resetVideo(video) {
   hidePlayerMessage();
 }
 
-function playHls(video, rawSources) {
+function playHls(video, rawSources, onDone) {
   const sources = uniqueUrls(Array.isArray(rawSources) ? rawSources : [rawSources]);
   const sessionId = ++playbackSession;
   let sourceIndex = 0;
   let attemptNumber = 0;
 
   const tryNextSource = (reason) => {
-    if (sessionId !== playbackSession) return;
+    if (sessionId !== playbackSession) {
+      if (onDone) onDone();
+      return;
+    }
     destroyPlayback(video);
 
     if (sourceIndex >= sources.length) {
       console.error('[HLS] All stream sources failed:', reason);
       showPlayerMessage('Unable to play this stream on your device. Please try again later.');
+      if (onDone) onDone();
       return;
     }
 
@@ -451,10 +592,37 @@ function playHls(video, rawSources) {
   tryNextSource('initial source');
 }
 
-function showPlayerMessage(msg) {
-  const el = document.getElementById('player-message');
-  el.textContent = msg;
-  el.classList.remove('hidden');
+/* ─── Event Delegation ─── */
+
+function handleGridClick(e) {
+  const card = e.target.closest('.card');
+  if (!card) return;
+  const matchId = card.dataset.matchId;
+  const match = allMatches.find(m => m.id === matchId);
+  if (match) openPlayer(match);
+}
+
+function handleModalBackdrop(e) {
+  if (e.target === e.currentTarget) closePlayer();
+}
+
+function handleKeyDown(e) {
+  if (e.key === 'Escape') closePlayer();
+}
+
+/* ─── Init ─── */
+
+function updateTabStyles() {
+  document.querySelectorAll('.tab-btn').forEach((btn) => {
+    const isActive = btn.dataset.tab === activeTab;
+    if (isActive) {
+      btn.classList.add('bg-primary', 'text-white', 'shadow-sm');
+      btn.classList.remove('text-muted-foreground');
+    } else {
+      btn.classList.remove('bg-primary', 'text-white', 'shadow-sm');
+      btn.classList.add('text-muted-foreground');
+    }
+  });
 }
 
 async function init() {
@@ -462,6 +630,15 @@ async function init() {
   const loader = document.getElementById('loader');
   const liveCountEl = document.getElementById('live-count');
   loader.textContent = 'Fetching live streams...';
+
+  // Event delegation for cards (XSS-safe, no memory leaks)
+  grid.addEventListener('click', handleGridClick);
+
+  // Modal interactions
+  document.getElementById('player-modal').addEventListener('click', handleModalBackdrop);
+  document.getElementById('close-player').addEventListener('click', closePlayer);
+  document.addEventListener('keydown', handleKeyDown);
+
   try {
     allMatches = await loadMatches();
     if (liveCountEl) {
@@ -483,34 +660,19 @@ async function init() {
   });
   updateTabStyles();
 
-  setInterval(() => {
-    if (!allMatches.length) return;
+  // Polling with Page Visibility API
+  pollIntervalId = setInterval(() => {
+    if (!isPageVisible || !allMatches.length) return;
     const changed = refreshLiveness(allMatches);
     if (liveCountEl) {
       liveCountEl.textContent = allMatches.filter((m) => m.isLive).length;
     }
     if (changed) filterAndRender();
   }, LIVE_POLL_INTERVAL_MS);
-}
 
-function updateTabStyles() {
-  document.querySelectorAll('.tab-btn').forEach((btn) => {
-    const isActive = btn.dataset.tab === activeTab;
-    if (isActive) {
-      btn.classList.add('bg-primary', 'text-white', 'shadow-sm');
-      btn.classList.remove('text-muted-foreground');
-    } else {
-      btn.classList.remove('bg-primary', 'text-white', 'shadow-sm');
-      btn.classList.add('text-muted-foreground');
-    }
+  document.addEventListener('visibilitychange', () => {
+    isPageVisible = !document.hidden;
   });
 }
-
-document.getElementById('close-player').addEventListener('click', () => {
-  document.getElementById('player-modal').classList.add('hidden');
-  document.getElementById('player-modal').classList.remove('flex');
-  document.body.classList.remove('overflow-hidden');
-  resetVideo(document.getElementById('video'));
-});
 
 init();
