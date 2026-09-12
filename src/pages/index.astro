@@ -4,37 +4,116 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="referrer" content="no-referrer" />
-  <title>Live Streams</title>
+  <title>sportlive — Live Matches</title>
   <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <style is:global>
+    .bg-stadium {
+      background-image:
+        radial-gradient(ellipse 80% 50% at 90% 30%, rgba(239, 68, 68, 0.15), transparent 50%),
+        radial-gradient(ellipse 60% 50% at 10% 80%, rgba(239, 68, 68, 0.08), transparent 50%),
+        linear-gradient(180deg, #050811 0%, #0a0f1a 100%);
+    }
+    .glass {
+      background: rgba(10, 15, 26, 0.55);
+      backdrop-filter: blur(16px) saturate(140%);
+      -webkit-backdrop-filter: blur(16px) saturate(140%);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .card {
+      @apply text-left border border-white/10 rounded-xl overflow-hidden cursor-pointer
+             transition-all duration-200 hover:border-primary/50 hover:-translate-y-0.5
+             hover:shadow-lg hover:shadow-primary/10;
+      background: rgba(15, 23, 42, 0.6);
+      backdrop-filter: blur(12px) saturate(140%);
+      -webkit-backdrop-filter: blur(12px) saturate(140%);
+    }
+    .card img {
+      @apply w-full aspect-video object-cover block;
+    }
+    .play-icon { width: 10px; height: 10px; }
+    .gradient-text {
+      background: linear-gradient(90deg, #ef4444, #f87171);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .separator { width: 28px; height: 2px; background: #ef4444; }
+  </style>
 </head>
-<body class="min-h-screen bg-background text-foreground font-sans antialiased">
-  <div class="mx-auto max-w-[1200px] px-4 py-8">
-    <div class="mb-6 flex items-center justify-between">
-      <h1 class="text-2xl font-bold tracking-tight">Live Streams</h1>
-      <span class="text-xs text-muted-foreground">manifest: <code class="rounded bg-muted px-1.5 py-0.5 text-[11px]">/streams.json</code></span>
+<body class="min-h-screen bg-stadium text-foreground font-sans antialiased overflow-x-hidden">
+  <!-- Header (sticky, glassmorphism) -->
+  <header class="sticky top-0 z-40 glass">
+    <div class="mx-auto max-w-[1200px] px-4 sm:px-6 lg:px-8 h-16 relative flex items-center justify-end sm:justify-between">
+      <!-- Mobile: centered logo -->
+      <div class="sm:hidden absolute left-1/2 -translate-x-1/2 flex items-center gap-1 text-xl font-extrabold tracking-tight">
+        <span class="text-white">sport</span><span class="gradient-text">live</span>
+        <span class="ml-1 inline-block h-2 w-2 rounded-full bg-primary"></span>
+      </div>
+      <!-- Desktop: logo on left -->
+      <div class="hidden sm:flex items-center gap-1 text-2xl font-extrabold tracking-tight">
+        <span class="text-white">sport</span><span class="gradient-text">live</span>
+        <span class="ml-1 inline-block h-2 w-2 rounded-full bg-primary"></span>
+      </div>
+      <nav class="flex items-center gap-6 text-sm text-muted-foreground"></nav>
     </div>
+  </header>
 
-    <div class="mb-6">
-      <div class="inline-flex h-10 items-center justify-center rounded-md bg-muted p-1 text-muted-foreground">
-        <button id="tab-live" type="button" class="tab-btn inline-flex items-center justify-center whitespace-nowrap rounded-sm px-4 py-1.5 text-sm font-medium transition-all" data-tab="live">
-          <span class="mr-1.5 inline-block h-2 w-2 rounded-full bg-red-500 animate-pulse-dot"></span>
-          Live
-        </button>
-        <button id="tab-upcoming" type="button" class="tab-btn inline-flex items-center justify-center whitespace-nowrap rounded-sm px-4 py-1.5 text-sm font-medium transition-all" data-tab="upcoming">
-          Upcoming
-        </button>
+  <!-- Hero -->
+  <section class="mx-auto max-w-[1200px] px-4 sm:px-6 lg:px-8 pt-10 pb-12">
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 items-end">
+      <div class="lg:col-span-2 space-y-3">
+        <p class="text-xs font-semibold tracking-[0.25em] text-primary uppercase">Now Streaming</p>
+        <h1 class="text-4xl sm:text-5xl lg:text-6xl font-extrabold tracking-tight">
+          <span class="text-white">Live</span> <span class="gradient-text">Matches</span>
+        </h1>
+        <p class="text-muted-foreground text-sm sm:text-base max-w-md">
+          Catch the action live, in real time.
+        </p>
+      </div>
+      <div class="hidden lg:block text-right space-y-2">
+        <div class="space-y-1">
+          <p class="text-xs font-semibold tracking-[0.25em] text-muted-foreground uppercase">Live Sports</p>
+          <p class="text-xs font-semibold tracking-[0.25em] text-muted-foreground uppercase">Anytime, Anywhere</p>
+        </div>
+        <div class="flex justify-end items-center gap-2 pt-3">
+          <span class="text-xs text-muted-foreground"><span id="live-count">0</span> live matches</span>
+          <span class="inline-block h-1.5 w-1.5 rounded-full bg-primary animate-pulse-dot"></span>
+        </div>
       </div>
     </div>
+  </section>
 
+  <!-- Tabs -->
+  <section class="mx-auto max-w-[1200px] px-4 sm:px-6 lg:px-8 mb-6">
+    <div class="inline-flex h-10 items-center justify-center rounded-md bg-white/5 border border-white/10 p-1">
+      <button id="tab-live" type="button" class="tab-btn inline-flex items-center justify-center whitespace-nowrap rounded-sm px-4 py-1.5 text-sm font-medium transition-all" data-tab="live">
+        <span class="mr-1.5 inline-block h-2 w-2 rounded-full bg-primary animate-pulse-dot"></span>
+        Live
+      </button>
+      <button id="tab-upcoming" type="button" class="tab-btn inline-flex items-center justify-center whitespace-nowrap rounded-sm px-4 py-1.5 text-sm font-medium transition-all" data-tab="upcoming">
+        Upcoming
+      </button>
+    </div>
+  </section>
+
+  <!-- Grid -->
+  <section class="mx-auto max-w-[1200px] px-4 sm:px-6 lg:px-8 pb-16">
     <div id="loader" class="text-muted-foreground text-sm">Loading manifest...</div>
     <div id="matches-grid" class="hidden grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5"></div>
-  </div>
+  </section>
 
+  <!-- Footer -->
+  <footer class="mx-auto max-w-[1200px] px-4 sm:px-6 lg:px-8 py-12 flex flex-col items-center gap-3">
+    <p class="text-xs font-semibold tracking-[0.4em] text-muted-foreground uppercase">Sports Unites Us</p>
+    <div class="separator"></div>
+  </footer>
+
+  <!-- Player Modal -->
   <div id="player-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/95 p-4">
     <div class="w-full max-w-[1000px]">
       <div class="mb-3 flex items-center justify-between">
         <span id="player-title" class="font-semibold"></span>
-        <button id="close-player" type="button" class="inline-flex items-center justify-center rounded-md border border-input bg-background px-3 py-1.5 text-sm font-medium text-foreground hover:bg-accent">
+        <button id="close-player" type="button" class="inline-flex items-center justify-center rounded-md border border-white/10 bg-white/5 px-3 py-1.5 text-sm font-medium text-foreground transition-colors hover:bg-white/10">
           Close
         </button>
       </div>

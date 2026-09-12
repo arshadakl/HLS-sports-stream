@@ -16,7 +16,7 @@ let activeTab = 'live';
 function renderCards(matches, grid) {
   grid.innerHTML = '';
   if (!matches || matches.length === 0) {
-    grid.innerHTML = '<p class="col-span-full text-center text-sm text-muted-foreground py-12">No events in this category.</p>';
+    grid.innerHTML = '<p class="col-span-full text-center text-sm text-muted-foreground py-16">No events in this category.</p>';
     return;
   }
   for (const raw of matches) {
@@ -126,9 +126,13 @@ function showPlayerMessage(msg) {
 async function init() {
   const grid = document.getElementById('matches-grid');
   const loader = document.getElementById('loader');
+  const liveCountEl = document.getElementById('live-count');
   try {
     const data = await loadManifest();
     allMatches = (data.matches || []).map(normalizeMatch);
+    if (liveCountEl) {
+      liveCountEl.textContent = allMatches.filter((m) => m.status === 'LIVE').length;
+    }
     filterAndRender();
     grid.classList.remove('hidden');
     loader.classList.add('hidden');
@@ -150,10 +154,10 @@ function updateTabStyles() {
   document.querySelectorAll('.tab-btn').forEach((btn) => {
     const isActive = btn.dataset.tab === activeTab;
     if (isActive) {
-      btn.classList.add('bg-background', 'text-foreground', 'shadow-sm');
+      btn.classList.add('bg-primary', 'text-white', 'shadow-sm');
       btn.classList.remove('text-muted-foreground');
     } else {
-      btn.classList.remove('bg-background', 'text-foreground', 'shadow-sm');
+      btn.classList.remove('bg-primary', 'text-white', 'shadow-sm');
       btn.classList.add('text-muted-foreground');
     }
   });
