@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="referrer" content="no-referrer" />
+  <title>Static HLS Delivery Pattern</title>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <style>
+    body { margin: 0; min-height: 100vh; background: #090d16; color: #f8fafc;
+      font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+    main { max-width: 1100px; margin: 2rem auto; padding: 0 1rem; }
+    .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+    #player-modal { position: fixed; inset: 0; background: rgba(0,0,0,.95); z-index: 50;
+      display: flex; align-items: center; justify-content: center; padding: 1rem; }
+    #player-modal.hidden, .hidden { display: none !important; }
+    video { width: 100%; max-width: 960px; background: #000; aspect-ratio: 16/9; }
+    .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="toolbar">
+      <h1 style="margin:0">Static HLS Delivery</h1>
+      <span style="font-size:0.8rem;color:#94a3b8">manifest: <code>/streams.json</code></span>
+    </div>
+    <div id="loader" style="color:#94a3b8">Loading manifest…</div>
+    <div id="matches-grid" class="grid hidden"></div>
+  </main>
+
+  <div id="player-modal" class="hidden">
+    <div style="width:100%; max-width:1000px">
+      <div class="toolbar">
+        <span id="player-title" style="font-weight:600"></span>
+        <button id="close-player" type="button"
+          style="background:transparent;color:#cbd5e1;border:1px solid #475569;border-radius:8px;padding:6px 12px;cursor:pointer">
+          Close
+        </button>
+      </div>
+      <video id="video" controls autoplay muted playsinline referrerpolicy="no-referrer"></video>
+      <div id="player-message" class="hidden" style="text-align:center;color:#94a3b8;margin-top:1rem">
+        No stream available for this event.
+      </div>
+    </div>
+  </div>
+
+  <script is:inline src="/demo-player.js"></script>
+</body>
+</html>
