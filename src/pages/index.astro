@@ -1,44 +1,45 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="referrer" content="no-referrer" />
-  <title>Static HLS Delivery Pattern</title>
+  <title>Live Streams</title>
   <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
-  <style>
-    body { margin: 0; min-height: 100vh; background: #090d16; color: #f8fafc;
-      font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
-    main { max-width: 1100px; margin: 2rem auto; padding: 0 1rem; }
-    .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
-    #player-modal { position: fixed; inset: 0; background: rgba(0,0,0,.95); z-index: 50;
-      display: flex; align-items: center; justify-content: center; padding: 1rem; }
-    #player-modal.hidden, .hidden { display: none !important; }
-    video { width: 100%; max-width: 960px; background: #000; aspect-ratio: 16/9; }
-    .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
-  </style>
 </head>
-<body>
-  <main>
-    <div class="toolbar">
-      <h1 style="margin:0">Static HLS Delivery</h1>
-      <span style="font-size:0.8rem;color:#94a3b8">manifest: <code>/streams.json</code></span>
+<body class="min-h-screen bg-background text-foreground font-sans antialiased">
+  <div class="mx-auto max-w-[1200px] px-4 py-8">
+    <div class="mb-6 flex items-center justify-between">
+      <h1 class="text-2xl font-bold tracking-tight">Live Streams</h1>
+      <span class="text-xs text-muted-foreground">manifest: <code class="rounded bg-muted px-1.5 py-0.5 text-[11px]">/streams.json</code></span>
     </div>
-    <div id="loader" style="color:#94a3b8">Loading manifest…</div>
-    <div id="matches-grid" class="grid hidden"></div>
-  </main>
 
-  <div id="player-modal" class="hidden">
-    <div style="width:100%; max-width:1000px">
-      <div class="toolbar">
-        <span id="player-title" style="font-weight:600"></span>
-        <button id="close-player" type="button"
-          style="background:transparent;color:#cbd5e1;border:1px solid #475569;border-radius:8px;padding:6px 12px;cursor:pointer">
+    <div class="mb-6">
+      <div class="inline-flex h-10 items-center justify-center rounded-md bg-muted p-1 text-muted-foreground">
+        <button id="tab-live" type="button" class="tab-btn inline-flex items-center justify-center whitespace-nowrap rounded-sm px-4 py-1.5 text-sm font-medium transition-all" data-tab="live">
+          <span class="mr-1.5 inline-block h-2 w-2 rounded-full bg-red-500 animate-pulse-dot"></span>
+          Live
+        </button>
+        <button id="tab-upcoming" type="button" class="tab-btn inline-flex items-center justify-center whitespace-nowrap rounded-sm px-4 py-1.5 text-sm font-medium transition-all" data-tab="upcoming">
+          Upcoming
+        </button>
+      </div>
+    </div>
+
+    <div id="loader" class="text-muted-foreground text-sm">Loading manifest...</div>
+    <div id="matches-grid" class="hidden grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5"></div>
+  </div>
+
+  <div id="player-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/95 p-4">
+    <div class="w-full max-w-[1000px]">
+      <div class="mb-3 flex items-center justify-between">
+        <span id="player-title" class="font-semibold"></span>
+        <button id="close-player" type="button" class="inline-flex items-center justify-center rounded-md border border-input bg-background px-3 py-1.5 text-sm font-medium text-foreground hover:bg-accent">
           Close
         </button>
       </div>
-      <video id="video" controls autoplay muted playsinline referrerpolicy="no-referrer"></video>
-      <div id="player-message" class="hidden" style="text-align:center;color:#94a3b8;margin-top:1rem">
+      <video id="video" class="aspect-video w-full rounded-lg bg-black" controls autoplay muted playsinline referrerpolicy="no-referrer"></video>
+      <div id="player-message" class="hidden mt-3 text-center text-sm text-muted-foreground">
         No stream available for this event.
       </div>
     </div>
