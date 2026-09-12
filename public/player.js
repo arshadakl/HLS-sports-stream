@@ -280,11 +280,12 @@ function renderCard(m) {
   const imgWrap = el('div', 'relative w-full overflow-hidden');
 
   if (m.poster) {
-    const img = el('img', 'block w-full aspect-video object-cover');
+    const img = el('img', 'block w-full aspect-video object-cover bg-muted');
     img.src = m.poster;
     img.alt = '';
     img.loading = 'lazy';
-    img.onerror = () => { img.style.display = 'none'; };
+    img.decoding = 'async';
+    img.referrerPolicy = 'no-referrer';
     imgWrap.appendChild(img);
   } else {
     const placeholder = el('div', 'block w-full aspect-video bg-muted');
