@@ -1,5 +1,5 @@
 async function loadManifest() {
-  const res = await fetch('/streams.json', { cache: 'no-store' });
+  const res = await fetch('https://raw.githubusercontent.com/drmlive/fancode-live-events/main/fancode.json', { cache: 'no-store' });
   if (!res.ok) throw new Error('manifest fetch failed');
   return res.json();
 }
