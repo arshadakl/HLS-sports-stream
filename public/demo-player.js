@@ -42,12 +42,15 @@ function renderCards(matches, grid) {
           </div>
         </div>
       </div>
-      <div class="px-3 py-2.5">
-        <p class="text-[13px] font-semibold leading-snug text-foreground line-clamp-2 mb-1">${m.title || m.match_name || ''}</p>
-        <p class="text-xs text-muted-foreground mb-2">${m.teams.join(' vs ')}</p>
-        <div class="flex items-center justify-between">
-          <span class="text-[11px] text-muted-foreground/70">${m.startTime || ''}</span>
-          ${m.stream ? '<span class="text-xs font-semibold text-primary hover:underline">Watch</span>' : ''}
+      <div class="px-4 py-4 space-y-2">
+        <p class="text-[14px] font-bold leading-snug text-foreground line-clamp-2">${m.title || m.match_name || ''}</p>
+        <p class="text-sm text-muted-foreground">${m.teams.join(' vs ')}</p>
+        <div class="flex items-center justify-between pt-1">
+          <span class="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground/80">
+            <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+            ${m.startTime || ''}
+          </span>
+          ${m.stream ? `<span class="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-semibold text-white">▶ Watch</span>` : ''}
         </div>
       </div>`;
     card.addEventListener('click', () => openPlayer(m));
