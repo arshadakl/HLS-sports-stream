@@ -29,17 +29,6 @@ function el(tag, className, text) {
   return e;
 }
 
-function svgIconCalendar() {
-  const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  s.setAttribute('class', 'h-3 w-3');
-  s.setAttribute('viewBox', '0 0 24 24');
-  s.setAttribute('fill', 'none');
-  s.setAttribute('stroke', 'currentColor');
-  s.setAttribute('stroke-width', '2');
-  s.innerHTML = '<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>';
-  return s;
-}
-
 function debounce(fn, ms) {
   let t;
   return (...args) => {
@@ -333,10 +322,17 @@ function renderCard(m) {
   body.appendChild(subtitle);
 
   const footer = el('div', 'flex items-center justify-between pt-1');
-  const timeWrap = el('span', 'inline-flex items-center gap-1.5 text-[11px] text-muted-foreground/80');
-  timeWrap.appendChild(svgIconCalendar());
-  timeWrap.appendChild(document.createTextNode(m.startTime || (m.isLive ? 'Now' : 'TBA')));
-  footer.appendChild(timeWrap);
+  if (m.isLive) {
+    const liveIndicator = el('span', 'inline-flex items-center gap-1.5 text-[11px] font-semibold text-primary');
+    const pulse = el('span', 'inline-block h-2 w-2 rounded-full bg-primary animate-pulse');
+    liveIndicator.appendChild(pulse);
+    liveIndicator.appendChild(document.createTextNode('LIVE NOW'));
+    footer.appendChild(liveIndicator);
+  } else {
+    const tba = el('span', 'inline-flex items-center gap-1.5 text-[11px] text-muted-foreground/80');
+    tba.appendChild(document.createTextNode('Upcoming'));
+    footer.appendChild(tba);
+  }
 
   if (m.streamUrl) {
     const watch = el('span', 'inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-semibold text-white');
