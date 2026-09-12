@@ -4,13 +4,20 @@ async function loadManifest() {
   return res.json();
 }
 
+function normalizeMatch(m) {
+  const teams = m.teams || [m.team_1, m.team_2].filter(Boolean);
+  const stream = m.stream || m.dai_url || m.adfree_url || null;
+  return { ...m, teams, stream };
+}
+
 function renderCards(matches, grid) {
   grid.innerHTML = '';
   if (!matches || matches.length === 0) {
     grid.innerHTML = '<p class="text-slate-400">No events.</p>';
     return;
   }
-  for (const m of matches) {
+  for (const raw of matches) {
+    const m = normalizeMatch(raw);
     const card = document.createElement('button');
     card.type = 'button';
     card.className =
