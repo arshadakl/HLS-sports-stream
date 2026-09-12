@@ -255,10 +255,20 @@ function renderCards(matches, grid) {
 
 function filterAndRender() {
   const grid = document.getElementById('matches-grid');
-  const filtered = allMatches.filter((m) => {
+  let filtered = allMatches.filter((m) => {
     if (activeTab === 'live') return m.isLive;
     return !m.isLive;
   });
+  // In the Live tab, show Football matches first, then everything else.
+  if (activeTab === 'live') {
+    const isFootball = (m) => (m.category || '').toLowerCase() === 'football';
+    filtered.sort((a, b) => {
+      const aF = isFootball(a) ? 1 : 0;
+      const bF = isFootball(b) ? 1 : 0;
+      if (aF !== bF) return bF - aF; // football first
+      return 0;
+    });
+  }
   renderCards(filtered, grid);
 }
 
