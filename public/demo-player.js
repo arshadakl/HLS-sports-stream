@@ -2,6 +2,14 @@ const FANCODE_URL = 'https://raw.githubusercontent.com/drmlive/fancode-live-even
 const SONYLIV_URL = 'https://raw.githubusercontent.com/drmlive/sliv-live-events/main/sonyliv.json';
 const DEFAULT_UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36';
 
+const LIVE_WINDOW_BEFORE_START_MS = 15 * 60 * 1000;
+const LIVE_WINDOW_AFTER_START_MS = 6 * 60 * 60 * 1000;
+const LIVE_POLL_INTERVAL_MS = 60 * 1000;
+
+const isMobileUA = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '');
+const isLowEndDevice = (navigator.hardwareConcurrency || 4) <= 4;
+const saveDataEnabled = !!(navigator.connection && navigator.connection.saveData);
+
 async function fetchJson(url) {
   try {
     const res = await fetch(url, { cache: 'no-store' });
@@ -22,6 +30,25 @@ function parseFancodeTime(str) {
   if (ampm.toUpperCase() === 'PM' && hh < 12) hh += 12;
   if (ampm.toUpperCase() === 'AM' && hh === 12) hh = 0;
   return new Date(`${YYYY}-${MM}-${DD}T${String(hh).padStart(2, '0')}:${mm}:${ss}+05:30`).getTime();
+}
+
+function computeIsLive({ provider, startTimeMs, upstreamStatus, upstreamIsLive }) {
+  const status = (upstreamStatus || '').toUpperCase();
+  const hasStartTime = typeof startTimeMs === 'number' && startTimeMs > 0;
+
+  if (status === 'UPCOMING') return false;
+  if (status === 'ENDED' || status === 'COMPLETED' || status === 'FINISHED') return false;
+
+  if (!hasStartTime) {
+    return upstreamIsLive === true;
+  }
+
+  const now = Date.now();
+  if (now < startTimeMs - LIVE_WINDOW_BEFORE_START_MS) return false;
+  if (now > startTimeMs + LIVE_WINDOW_AFTER_START_MS) return false;
+
+  if (status === 'LIVE') return true;
+  return upstreamIsLive === true;
 }
 
 function buildUrlProxy(rawUrl, ua) {
@@ -64,10 +91,17 @@ function buildSonyLivStreamUrls(m) {
 function normalizeFancode(m) {
   const ua = m['user-agent'] || DEFAULT_UA;
   const streamUrls = buildFancodeStreamUrls(m, ua);
+  const startTimeMs = parseFancodeTime(m.startTime);
+  const isLive = computeIsLive({
+    provider: 'Fancode',
+    startTimeMs,
+    upstreamStatus: m.status,
+    upstreamIsLive: m.status === 'LIVE',
+  });
   return {
     id: 'fancode:' + m.match_id,
     provider: 'Fancode',
-    isLive: m.status === 'LIVE',
+    isLive,
     status: m.status,
     title: m.match_name || m.title || 'Fancode Event',
     competition: m.event_name || m.event_category || 'Unknown',
@@ -78,7 +112,7 @@ function normalizeFancode(m) {
     language: m.audioLanguageName || null,
     poster: m.src,
     startTime: m.startTime || null,
-    startTimeMs: parseFancodeTime(m.startTime),
+    startTimeMs,
     streamUrls,
     streamUrl: streamUrls[0] || null,
   };
@@ -86,14 +120,19 @@ function normalizeFancode(m) {
 
 function normalizeSonyLiv(m) {
   const streamUrls = buildSonyLivStreamUrls(m);
-  // SonyLiv prefixes event_name with "Upcoming - " or "Live - " sometimes
   let cleanTitle = m.event_name || 'SonyLiv Event';
   cleanTitle = cleanTitle.replace(/^Upcoming\s*-\s*/i, '').replace(/^Live\s*-\s*/i, '');
+  const isLive = computeIsLive({
+    provider: 'SonyLiv',
+    startTimeMs: 0,
+    upstreamStatus: m.isLive ? 'LIVE' : 'UPCOMING',
+    upstreamIsLive: m.isLive === true,
+  });
   return {
     id: 'sonyliv:' + m.contentId,
     provider: 'SonyLiv',
-    isLive: m.isLive === true,
-    status: m.isLive ? 'LIVE' : 'UPCOMING',
+    isLive,
+    status: isLive ? 'LIVE' : 'UPCOMING',
     title: cleanTitle,
     competition: m.event_name || m.event_category || 'Unknown',
     team1: null,
@@ -124,6 +163,31 @@ async function loadMatches() {
     return 0;
   });
   return matches;
+}
+
+function refreshLiveness(matches) {
+  let changed = false;
+  for (const m of matches) {
+    const next = computeIsLive({
+      provider: m.provider,
+      startTimeMs: m.startTimeMs,
+      upstreamStatus: m.status,
+      upstreamIsLive: m.status === 'LIVE' || m.isLive,
+    });
+    if (next !== m.isLive) {
+      m.isLive = next;
+      m.status = next ? 'LIVE' : 'UPCOMING';
+      changed = true;
+    }
+  }
+  if (changed) {
+    matches.sort((a, b) => {
+      if (a.isLive !== b.isLive) return a.isLive ? -1 : 1;
+      if (a.startTimeMs && b.startTimeMs) return a.startTimeMs - b.startTimeMs;
+      return 0;
+    });
+  }
+  return changed;
 }
 
 let allMatches = [];
@@ -306,13 +370,31 @@ function playHls(video, rawSources) {
       const hls = new window.Hls({
         enableWorker: true,
         lowLatencyMode: false,
-        backBufferLength: 60,
-        maxBufferLength: 30,
-        maxMaxBufferLength: 120,
+        capLevelToPlayerSize: true,
+        maxAutoLevelCapping: isMobileUA ? 480 : -1,
+        startLevel: isMobileUA ? -1 : -1,
+        backBufferLength: isMobileUA ? 30 : 60,
+        maxBufferLength: isMobileUA ? 20 : 30,
+        maxMaxBufferLength: isMobileUA ? 60 : 120,
+        maxBufferSize: isMobileUA ? 30 * 1000 * 1000 : 60 * 1000 * 1000,
+        maxFragLoadingTimeMs: 20000,
         fragLoadingMaxRetry: 6,
-        manifestLoadingMaxRetry: 4,
-        levelLoadingMaxRetry: 4,
+        fragLoadingRetryDelay: 1000,
+        manifestLoadingMaxRetry: 6,
+        manifestLoadingRetryDelay: 1000,
+        levelLoadingMaxRetry: 6,
+        levelLoadingRetryDelay: 1000,
+        abrEwmaDefaultEstimate: isLowEndDevice ? 500000 : 1000000,
+        abrBandWidthFactor: 0.9,
+        abrBandWidthUpFactor: isMobileUA ? 0.6 : 0.7,
+        liveSyncDurationCount: isMobileUA ? 2 : 3,
+        liveMaxLatencyDurationCount: isMobileUA ? 5 : 6,
+        enableSoftwareAES: !window.isSecureContext,
+        progressive: false,
       });
+      if (saveDataEnabled) {
+        hls.config.startLevel = 0;
+      }
       window.__hls = hls;
       hls.on(window.Hls.Events.MEDIA_ATTACHED, () => hls.loadSource(src));
       hls.on(window.Hls.Events.MANIFEST_PARSED, () => tryAutoplay(video, isCurrent));
@@ -370,6 +452,15 @@ async function init() {
     });
   });
   updateTabStyles();
+
+  setInterval(() => {
+    if (!allMatches.length) return;
+    const changed = refreshLiveness(allMatches);
+    if (liveCountEl) {
+      liveCountEl.textContent = allMatches.filter((m) => m.isLive).length;
+    }
+    if (changed) filterAndRender();
+  }, LIVE_POLL_INTERVAL_MS);
 }
 
 function updateTabStyles() {
