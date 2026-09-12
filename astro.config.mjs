@@ -1,11 +1,13 @@
 import { defineConfig } from 'astro/config';
-import node from '@astrojs/node';
+import cloudflare from '@astrojs/cloudflare';
 import tailwind from '@astrojs/tailwind';
 
 export default defineConfig({
-  site: 'https://REPLACE-WITH-YOUR-PROJECT.pages.dev',
+  site: 'https://hls-sports-stream.pages.dev',
   output: 'hybrid',
-  adapter: node({ mode: 'standalone' }),
+  adapter: cloudflare({
+    platformProxy: { enabled: true },
+  }),
   integrations: [tailwind()],
   vite: {
     server: {
