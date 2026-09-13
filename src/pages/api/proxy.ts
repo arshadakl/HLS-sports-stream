@@ -167,7 +167,15 @@ const handleRequest: APIRoute = async ({ url, request }) => {
     return jsonError('Invalid or unsupported url', 400, requestOrigin, request.url);
   }
 
-  const upstreamHeaders = new Headers({ 'User-Agent': ua });
+  // Pass through the browser's native User-Agent so that FanCode/Akamai
+  // edges see a UA matching the device class. iOS Safari clients used to
+  // receive the default desktop-Linux UA, which can trigger edge throttling
+  // or hotlink-token rejection. The ?ua= query param still acts as a
+  // debug override.
+  const browserUa = request.headers.get('user-agent');
+  const upstreamHeaders = new Headers({
+    'User-Agent': browserUa && browserUa.length > 0 ? browserUa : ua,
+  });
   // Do not forward the website Origin to media CDNs. It is only relevant to
   // the browser-to-proxy CORS check and can cause upstream origin filtering.
   for (const name of ['Accept', 'Range', 'If-Range']) {
