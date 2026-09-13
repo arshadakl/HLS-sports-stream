@@ -55,6 +55,21 @@
       background-clip: text;
     }
     .separator { width: 28px; height: 2px; background: #ef4444; }
+    #video-shell.is-choosing {
+      min-height: min(72vh, 460px);
+    }
+    #video-shell.is-choosing #video {
+      position: absolute;
+      inset: 0;
+      height: 100%;
+      object-fit: cover;
+    }
+    @media (min-width: 640px) {
+      #video-shell.is-choosing {
+        min-height: 0;
+        aspect-ratio: 16 / 9;
+      }
+    }
   </style>
 </head>
 <body class="min-h-screen bg-stadium text-foreground font-sans antialiased overflow-x-hidden">
@@ -135,16 +150,31 @@
   </footer>
 
   <!-- Player Modal -->
-  <div id="player-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/95 p-4">
+  <div id="player-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/95 p-4" role="dialog" aria-modal="true" aria-labelledby="player-title">
     <div class="w-full max-w-[1000px]">
       <div class="mb-3 flex items-center justify-between">
         <span id="player-title" class="font-semibold"></span>
-        <button id="close-player" type="button" class="inline-flex items-center justify-center rounded-md border border-white/10 bg-white/5 px-3 py-1.5 text-sm font-medium text-foreground transition-colors hover:bg-white/10">
+        <button id="close-player" type="button" class="inline-flex min-h-11 items-center justify-center rounded-md border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">
           Close
         </button>
       </div>
-      <video id="video" class="aspect-video w-full rounded-lg bg-black" controls muted playsinline referrerpolicy="no-referrer" preload="auto"></video>
-      <div id="player-message" class="hidden mt-3 text-center text-sm text-muted-foreground">
+      <div id="video-shell" class="relative overflow-hidden rounded-lg bg-black">
+        <video id="video" class="aspect-video w-full bg-black" controls muted playsinline referrerpolicy="no-referrer" preload="metadata"></video>
+        <div id="quality-chooser" class="absolute inset-0 hidden overflow-y-auto bg-gradient-to-b from-black/45 via-black/75 to-black/95 p-4 sm:p-8">
+          <div class="mx-auto flex min-h-full max-w-2xl flex-col justify-center">
+            <div class="mb-4 text-center">
+              <p class="text-lg font-bold text-white sm:text-2xl">Choose video quality</p>
+              <p class="mt-1 text-xs text-slate-300 sm:text-sm">You can change this while watching.</p>
+            </div>
+            <div id="quality-options" class="grid grid-cols-2 gap-2 sm:grid-cols-3" role="group" aria-label="Choose video quality"></div>
+          </div>
+        </div>
+      </div>
+      <div id="quality-controls" class="mt-3 hidden items-center justify-end gap-2">
+        <label for="quality-select" class="text-sm text-muted-foreground">Quality</label>
+        <select id="quality-select" aria-label="Video quality" class="min-h-11 min-w-36 rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm font-medium text-white outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/40 disabled:cursor-wait disabled:opacity-60"></select>
+      </div>
+      <div id="player-message" class="hidden mt-3 text-center text-sm text-muted-foreground" role="status" aria-live="polite">
         No stream available for this event.
       </div>
     </div>

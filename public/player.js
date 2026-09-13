@@ -120,6 +120,229 @@ function uniqueUrls(urls) {
   return [...new Set(urls.filter(Boolean))];
 }
 
+function decodeHexManifest(hex) {
+  if (typeof hex !== 'string' || hex.length === 0 || hex.length % 2 !== 0 || !/^[0-9a-f]+$/i.test(hex)) {
+    throw new Error('Invalid hex manifest');
+  }
+
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let index = 0; index < hex.length; index += 2) {
+    bytes[index / 2] = Number.parseInt(hex.slice(index, index + 2), 16);
+  }
+
+  const manifest = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  if (!manifest.trimStart().startsWith('#EXTM3U')) {
+    throw new Error('Decoded content is not an HLS manifest');
+  }
+  return manifest;
+}
+
+function parseAttributeList(line) {
+  const separatorIndex = line.indexOf(':');
+  const input = separatorIndex === -1 ? line : line.slice(separatorIndex + 1);
+  const attributes = {};
+  let index = 0;
+
+  while (index < input.length) {
+    while (index < input.length && (input[index] === ',' || /\s/.test(input[index]))) index += 1;
+    if (index >= input.length) break;
+
+    const keyStart = index;
+    while (index < input.length && input[index] !== '=' && input[index] !== ',') index += 1;
+    const key = input.slice(keyStart, index).trim().toUpperCase();
+    if (!key || input[index] !== '=') {
+      while (index < input.length && input[index] !== ',') index += 1;
+      continue;
+    }
+
+    index += 1;
+    let value = '';
+    if (input[index] === '"') {
+      index += 1;
+      while (index < input.length) {
+        if (input[index] === '"') {
+          index += 1;
+          break;
+        }
+        value += input[index];
+        index += 1;
+      }
+    } else {
+      const valueStart = index;
+      while (index < input.length && input[index] !== ',') index += 1;
+      value = input.slice(valueStart, index).trim();
+    }
+
+    attributes[key] = value;
+    while (index < input.length && input[index] !== ',') index += 1;
+    if (input[index] === ',') index += 1;
+  }
+
+  return attributes;
+}
+
+function resolveHttpUrl(value, baseUrl) {
+  try {
+    const resolved = baseUrl ? new URL(value, baseUrl) : new URL(value);
+    return resolved.protocol === 'http:' || resolved.protocol === 'https:' ? resolved.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function findManifestBaseUrl(lines) {
+  for (const line of lines) {
+    const candidate = line.trim();
+    if (!candidate || candidate.startsWith('#')) continue;
+    const absoluteUrl = resolveHttpUrl(candidate);
+    if (absoluteUrl) return absoluteUrl;
+  }
+  return null;
+}
+
+function parseMasterVariants(hex, ua, cdn) {
+  let manifest;
+  try {
+    manifest = decodeHexManifest(hex);
+  } catch {
+    return [];
+  }
+
+  const lines = manifest.split(/\r?\n/);
+  const baseUrl = findManifestBaseUrl(lines);
+  const variants = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].trim();
+    if (!line.startsWith('#EXT-X-STREAM-INF:')) continue;
+
+    const attributes = parseAttributeList(line);
+    const resolutionMatch = /^(\d+)x(\d+)$/i.exec(attributes.RESOLUTION || '');
+    if (!resolutionMatch) continue;
+
+    let uri = null;
+    for (let uriIndex = index + 1; uriIndex < lines.length; uriIndex += 1) {
+      const candidate = lines[uriIndex].trim();
+      if (!candidate) continue;
+      if (candidate.startsWith('#')) continue;
+      uri = candidate;
+      index = uriIndex;
+      break;
+    }
+    if (!uri) continue;
+
+    const rawUrl = resolveHttpUrl(uri, baseUrl);
+    if (!rawUrl) continue;
+
+    const width = Number.parseInt(resolutionMatch[1], 10);
+    const height = Number.parseInt(resolutionMatch[2], 10);
+    const frameRate = Number.parseFloat(attributes['FRAME-RATE']) || 0;
+    const bandwidth = Number.parseInt(attributes['AVERAGE-BANDWIDTH'] || attributes.BANDWIDTH, 10) || 0;
+
+    variants.push({
+      id: '',
+      label: '',
+      width,
+      height,
+      frameRate,
+      bandwidth,
+      codecs: attributes.CODECS || '',
+      sources: [{ cdn, url: buildUrlProxy(rawUrl, ua) }],
+    });
+  }
+
+  return variants;
+}
+
+function sameRendition(a, b) {
+  return a.width === b.width
+    && a.height === b.height
+    && Math.abs((a.frameRate || 0) - (b.frameRate || 0)) < 0.5;
+}
+
+function formatFrameRate(frameRate) {
+  if (!frameRate) return '';
+  return Number.isInteger(frameRate) ? String(frameRate) : frameRate.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+}
+
+function makeVariantId(variant) {
+  const fps = formatFrameRate(variant.frameRate || 0).replace('.', '-');
+  return `${variant.height}p-${fps || 'unknown'}-${variant.bandwidth || 0}`;
+}
+
+function mergeQualityVariants(googleVariants, akamaiVariants) {
+  const merged = (googleVariants || []).map((variant) => ({
+    ...variant,
+    sources: [...variant.sources],
+  }));
+
+  for (const variant of (akamaiVariants || [])) {
+    const candidates = merged
+      .map((item, index) => ({ item, index }))
+      .filter(({ item }) => sameRendition(item, variant) && !item.sources.some((source) => source.cdn === 'akamai'))
+      .sort((a, b) => {
+        const aDifference = Math.abs((a.item.bandwidth || 0) - (variant.bandwidth || 0));
+        const bDifference = Math.abs((b.item.bandwidth || 0) - (variant.bandwidth || 0));
+        return aDifference - bDifference;
+      });
+
+    const match = candidates[0] && merged[candidates[0].index];
+    if (match) {
+      for (const source of variant.sources) {
+        if (!match.sources.some((existing) => existing.cdn === source.cdn && existing.url === source.url)) {
+          match.sources.push(source);
+        }
+      }
+      if (!match.codecs && variant.codecs) match.codecs = variant.codecs;
+    } else {
+      merged.push({ ...variant, sources: [...variant.sources] });
+    }
+  }
+
+  merged.sort((a, b) => (
+    b.height - a.height
+    || b.frameRate - a.frameRate
+    || b.bandwidth - a.bandwidth
+  ));
+
+  const usedIds = new Map();
+  const heightGroups = new Map();
+  for (const variant of merged) {
+    const group = heightGroups.get(variant.height) || [];
+    group.push(variant);
+    heightGroups.set(variant.height, group);
+  }
+
+  for (const variant of merged) {
+    const baseId = makeVariantId(variant);
+    const duplicateNumber = usedIds.get(baseId) || 0;
+    usedIds.set(baseId, duplicateNumber + 1);
+    variant.id = duplicateNumber ? `${baseId}-${duplicateNumber + 1}` : baseId;
+
+    const sameHeight = heightGroups.get(variant.height) || [];
+    const minimumFrameRate = Math.min(...sameHeight.map((item) => item.frameRate || 0));
+    const showFrameRate = variant.frameRate >= 45
+      || (sameHeight.length > 1 && variant.frameRate > minimumFrameRate + 0.5);
+    variant.label = `${variant.height}p${showFrameRate ? ` ${formatFrameRate(variant.frameRate)}fps` : ''}`;
+  }
+
+  const duplicateLabels = new Set();
+  const labelCounts = merged.reduce((counts, variant) => {
+    counts.set(variant.label, (counts.get(variant.label) || 0) + 1);
+    return counts;
+  }, new Map());
+  for (const variant of merged) {
+    if (labelCounts.get(variant.label) > 1 && !duplicateLabels.has(variant.id)) {
+      const mbps = variant.bandwidth ? ` · ${(variant.bandwidth / 1_000_000).toFixed(1)} Mbps` : '';
+      variant.label += mbps;
+      duplicateLabels.add(variant.id);
+    }
+    variant.sources.sort((a, b) => (a.cdn === 'google' ? -1 : 1) - (b.cdn === 'google' ? -1 : 1));
+  }
+
+  return merged;
+}
+
 /* ─── Normalizers ─── */
 
 function buildFancodeStreamUrls(m, ua) {
@@ -142,6 +365,14 @@ function buildSonyLivStreamUrls(m) {
 function normalizeFancode(m) {
   const ua = m['user-agent'] || DEFAULT_UA;
   const streamUrls = buildFancodeStreamUrls(m, ua);
+  const masterSources = [
+    { cdn: 'google', url: buildHexProxy(m.google_m3u8_hex, ua) },
+    { cdn: 'akamai', url: buildHexProxy(m.akamai_m3u8_hex, ua) },
+  ].filter((source) => source.url);
+  const qualityOptions = mergeQualityVariants(
+    parseMasterVariants(m.google_m3u8_hex, ua, 'google'),
+    parseMasterVariants(m.akamai_m3u8_hex, ua, 'akamai'),
+  );
   const startTimeMs = parseFancodeTime(m.startTime);
   const isLive = computeIsLive({
     provider: 'Fancode',
@@ -166,6 +397,8 @@ function normalizeFancode(m) {
     startTimeMs,
     streamUrls,
     streamUrl: streamUrls[0] || null,
+    masterSources,
+    qualityOptions,
   };
 }
 
@@ -196,6 +429,8 @@ function normalizeSonyLiv(m) {
     startTimeMs: 0,
     streamUrls,
     streamUrl: streamUrls[0] || null,
+    masterSources: [],
+    qualityOptions: [],
   };
 }
 
@@ -207,6 +442,9 @@ let playbackSession = 0;
 let isLoadingStream = false;
 let pollIntervalId = null;
 let isPageVisible = true;
+let activeMatch = null;
+let selectedQualityId = null;
+let previouslyFocusedElement = null;
 
 /* ─── Data Loading ─── */
 
@@ -387,51 +625,14 @@ function filterAndRender() {
 
 /* ─── Player ─── */
 
-function openPlayer(match) {
-  if (isLoadingStream) return;
-  isLoadingStream = true;
-
-  const modal = document.getElementById('player-modal');
-  const video = document.getElementById('video');
-  const title = document.getElementById('player-title');
-  const message = document.getElementById('player-message');
-
-  resetVideo(video);
-
-  title.textContent = match.title;
-  modal.classList.remove('hidden');
-  modal.classList.add('flex');
-  document.body.classList.add('overflow-hidden');
-
-  if (match.poster) {
-    video.poster = match.poster;
-  }
-
-  if (!match.streamUrl) {
-    message.textContent = 'Stream not yet available for this event.';
-    message.classList.remove('hidden');
-    isLoadingStream = false;
-    return;
-  }
-
-  message.classList.add('hidden');
-  playHls(video, match.streamUrls || [match.streamUrl], () => {
-    isLoadingStream = false;
-  });
-}
-
-function closePlayer() {
-  const modal = document.getElementById('player-modal');
-  modal.classList.add('hidden');
-  modal.classList.remove('flex');
-  document.body.classList.remove('overflow-hidden');
-  resetVideo(document.getElementById('video'));
-  isLoadingStream = false;
-}
-
 function isSafari() {
   const ua = navigator.userAgent;
   return /Safari/.test(ua) && !/Chrome|Chromium|Android/.test(ua);
+}
+
+function usesNativeHls(video) {
+  return !!video.canPlayType('application/vnd.apple.mpegurl')
+    && (!window.Hls || !window.Hls.isSupported() || isSafari());
 }
 
 function hidePlayerMessage() {
@@ -452,20 +653,27 @@ function tryAutoplay(video, isCurrent = () => true) {
     }).catch((err) => {
       if (!isCurrent()) return;
       if (err && err.name === 'NotAllowedError') {
-        console.warn('[HLS] Autoplay blocked, user gesture required:', err);
+        console.warn('[HLS] Autoplay blocked by browser policy.');
         showPlayerMessage('Tap the play button to start the stream.');
       } else {
-        console.warn('[HLS] Playback did not start:', err);
+        console.warn('[HLS] Playback did not start:', (err && err.name) || 'unknown error');
       }
     });
   }
 }
 
+let nativePlaybackCleanup = null;
+let playbackRetryTimerId = null;
+
 function destroyPlayback(video) {
   if (window.__hls) { window.__hls.destroy(); window.__hls = null; }
-  if (window.__nativeHlsErrorHandler) {
-    video.removeEventListener('error', window.__nativeHlsErrorHandler);
-    window.__nativeHlsErrorHandler = null;
+  if (nativePlaybackCleanup) {
+    nativePlaybackCleanup();
+    nativePlaybackCleanup = null;
+  }
+  if (playbackRetryTimerId) {
+    clearTimeout(playbackRetryTimerId);
+    playbackRetryTimerId = null;
   }
 }
 
@@ -479,27 +687,67 @@ function resetVideo(video) {
   hidePlayerMessage();
 }
 
-function playHls(video, rawSources, onDone) {
-  const sources = uniqueUrls(Array.isArray(rawSources) ? rawSources : [rawSources]);
+function normalizePlaybackSources(rawSources) {
+  const normalized = [];
+  const seen = new Set();
+  const sources = Array.isArray(rawSources) ? rawSources : [rawSources];
+  for (const source of sources) {
+    const candidate = typeof source === 'string' ? { url: source, cdn: null } : source;
+    if (!candidate || !candidate.url || seen.has(candidate.url)) continue;
+    seen.add(candidate.url);
+    normalized.push(candidate);
+  }
+  return normalized;
+}
+
+function findMatchingHlsLevel(levels, variant) {
+  const matchingResolution = (levels || [])
+    .map((level, index) => ({ level, index }))
+    .filter(({ level }) => level.height === variant.height && (!variant.width || !level.width || level.width === variant.width));
+  if (!matchingResolution.length) return -1;
+
+  const levelsWithFrameRate = matchingResolution.filter(({ level }) => Number(level.frameRate) > 0);
+  const matchingFrameRate = variant.frameRate && levelsWithFrameRate.length
+    ? matchingResolution.filter(({ level }) => Math.abs(Number(level.frameRate) - variant.frameRate) < 0.5)
+    : matchingResolution;
+  if (!matchingFrameRate.length) return -1;
+
+  matchingFrameRate.sort((a, b) => {
+    const aBandwidth = Number(a.level.averageBitrate || a.level.bitrate || a.level.maxBitrate || 0);
+    const bBandwidth = Number(b.level.averageBitrate || b.level.bitrate || b.level.maxBitrate || 0);
+    return Math.abs(aBandwidth - variant.bandwidth) - Math.abs(bBandwidth - variant.bandwidth);
+  });
+  return matchingFrameRate[0].index;
+}
+
+function seekToLiveEdge(video) {
+  try {
+    if (!video.seekable || video.seekable.length === 0) return;
+    const liveEdge = video.seekable.end(video.seekable.length - 1);
+    if (Number.isFinite(liveEdge)) video.currentTime = Math.max(0, liveEdge - 0.5);
+  } catch {
+    // Some native HLS implementations reject seeks until playback begins.
+  }
+}
+
+function playHls(video, rawSources, options = {}) {
+  const sources = normalizePlaybackSources(rawSources);
   const sessionId = ++playbackSession;
   let sourceIndex = 0;
   let attemptNumber = 0;
 
   const tryNextSource = (reason) => {
-    if (sessionId !== playbackSession) {
-      if (onDone) onDone();
-      return;
-    }
+    if (sessionId !== playbackSession) return;
     destroyPlayback(video);
 
     if (sourceIndex >= sources.length) {
-      console.error('[HLS] All stream sources failed:', reason);
-      showPlayerMessage('Unable to play this stream on your device. Please try again later.');
-      if (onDone) onDone();
+      console.error('[HLS] All stream sources failed.');
+      if (options.onExhausted) options.onExhausted(reason);
       return;
     }
 
-    const src = sources[sourceIndex++];
+    const candidate = sources[sourceIndex++];
+    if (options.onSourceAttempt) options.onSourceAttempt();
     const currentAttempt = ++attemptNumber;
     const isCurrent = () => sessionId === playbackSession && currentAttempt === attemptNumber;
     let candidateFailed = false;
@@ -507,11 +755,19 @@ function playHls(video, rawSources, onDone) {
     const failCandidate = (failureReason) => {
       if (!isCurrent() || candidateFailed) return;
       candidateFailed = true;
-      console.warn('[HLS] Stream source failed:', failureReason);
+      console.warn('[HLS] Stream source failed; trying the next safe fallback.');
+      if (options.onRetry) options.onRetry();
       if (sourceIndex < sources.length) {
         showPlayerMessage('Primary stream unavailable. Trying a backup…');
       }
-      setTimeout(() => tryNextSource(failureReason), NATIVE_RETRY_DELAY_MS);
+      if (nativePlaybackCleanup) {
+        nativePlaybackCleanup();
+        nativePlaybackCleanup = null;
+      }
+      playbackRetryTimerId = setTimeout(() => {
+        playbackRetryTimerId = null;
+        tryNextSource(failureReason);
+      }, NATIVE_RETRY_DELAY_MS);
     };
 
     video.pause();
@@ -519,16 +775,25 @@ function playHls(video, rawSources, onDone) {
     try { video.load(); } catch (e) {}
 
     // iOS browsers use the native HLS media stack rather than MediaSource.
-    if (video.canPlayType('application/vnd.apple.mpegurl') && (!window.Hls || !window.Hls.isSupported() || isSafari())) {
+    if (usesNativeHls(video)) {
       const onNativeError = () => {
         const errorCode = video.error && video.error.code;
         const msg = NATIVE_ERROR_MAP[errorCode] || ('native media error ' + (errorCode || 'unknown'));
         failCandidate(msg);
       };
-      window.__nativeHlsErrorHandler = onNativeError;
+      const onNativeReady = () => {
+        if (!isCurrent()) return;
+        if (options.resumeAtLiveEdge) seekToLiveEdge(video);
+        if (options.onReady) options.onReady();
+        if (options.shouldAutoplay) tryAutoplay(video, isCurrent);
+      };
+      nativePlaybackCleanup = () => {
+        video.removeEventListener('error', onNativeError);
+        video.removeEventListener('canplay', onNativeReady);
+      };
       video.addEventListener('error', onNativeError, { once: true });
-      video.addEventListener('canplay', () => tryAutoplay(video, isCurrent), { once: true });
-      video.src = src;
+      video.addEventListener('canplay', onNativeReady, { once: true });
+      video.src = candidate.url;
       try { video.load(); } catch (e) {}
       return;
     }
@@ -539,8 +804,7 @@ function playHls(video, rawSources, onDone) {
         enableWorker: true,
         lowLatencyMode: false,
         capLevelToPlayerSize: true,
-        maxAutoLevelCapping: isMobileUA ? 480 : -1,
-        startLevel: isMobileUA ? -1 : -1,
+        startLevel: -1,
         backBufferLength: isMobileUA ? 30 : 60,
         maxBufferLength: isMobileUA ? 20 : 30,
         maxMaxBufferLength: isMobileUA ? 60 : 120,
@@ -564,8 +828,27 @@ function playHls(video, rawSources, onDone) {
         hls.config.startLevel = 0;
       }
       window.__hls = hls;
-      hls.on(window.Hls.Events.MEDIA_ATTACHED, () => hls.loadSource(src));
-      hls.on(window.Hls.Events.MANIFEST_PARSED, () => tryAutoplay(video, isCurrent));
+      hls.on(window.Hls.Events.MEDIA_ATTACHED, () => hls.loadSource(candidate.url));
+      hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
+        if (!isCurrent()) return;
+        if (options.variant) {
+          const targetLevel = findMatchingHlsLevel(hls.levels, options.variant);
+          if (targetLevel < 0) {
+            failCandidate('selected rendition is absent from this source');
+            return;
+          }
+          hls.currentLevel = targetLevel;
+        } else {
+          hls.currentLevel = -1;
+        }
+        if (options.onReady) options.onReady();
+        if (options.shouldAutoplay) tryAutoplay(video, isCurrent);
+      });
+      hls.on(window.Hls.Events.LEVEL_SWITCHED, (_, data) => {
+        if (!isCurrent() || !options.onLevelSwitched) return;
+        const level = hls.levels && hls.levels[data.level];
+        options.onLevelSwitched(level || null);
+      });
       hls.on(window.Hls.Events.ERROR, (_, data) => {
         if (!isCurrent()) return;
         console.warn('[HLS] error:', data.type, data.details, data.fatal);
@@ -589,6 +872,230 @@ function playHls(video, rawSources, onDone) {
   tryNextSource('initial source');
 }
 
+function setQualityControlLoading(isLoading) {
+  const select = document.getElementById('quality-select');
+  select.disabled = isLoading;
+  select.setAttribute('aria-busy', String(isLoading));
+  isLoadingStream = isLoading;
+}
+
+function setAutoQualityLabel(height) {
+  const select = document.getElementById('quality-select');
+  const autoOption = Array.from(select.options).find((option) => option.value === 'auto');
+  if (autoOption) autoOption.textContent = height ? `Auto (${height}p)` : 'Auto';
+}
+
+function resetQualityUi() {
+  const chooser = document.getElementById('quality-chooser');
+  const options = document.getElementById('quality-options');
+  const controls = document.getElementById('quality-controls');
+  const select = document.getElementById('quality-select');
+  const shell = document.getElementById('video-shell');
+  chooser.classList.add('hidden');
+  controls.classList.add('hidden');
+  controls.classList.remove('flex');
+  shell.classList.remove('is-choosing');
+  options.replaceChildren();
+  select.replaceChildren();
+  select.disabled = false;
+  select.removeAttribute('aria-busy');
+}
+
+function createQualityButton(qualityId, label, detail) {
+  const button = el('button', 'quality-option min-h-11 rounded-lg border border-white/15 bg-black/55 px-3 py-2 text-center text-sm font-semibold text-white backdrop-blur-sm transition hover:border-primary hover:bg-primary/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary');
+  button.type = 'button';
+  button.dataset.qualityId = qualityId;
+  button.setAttribute('aria-label', detail ? `${label} (${detail})` : label);
+  button.appendChild(el('span', 'block', label));
+  if (detail) button.appendChild(el('span', 'mt-0.5 block text-[10px] font-medium uppercase tracking-wider text-slate-300', detail));
+  return button;
+}
+
+function renderQualityChooser(match) {
+  const chooser = document.getElementById('quality-chooser');
+  const options = document.getElementById('quality-options');
+  const shell = document.getElementById('video-shell');
+  options.replaceChildren();
+  options.appendChild(createQualityButton('auto', 'Auto', 'Recommended'));
+  for (const variant of match.qualityOptions) {
+    options.appendChild(createQualityButton(variant.id, variant.label));
+  }
+  shell.classList.add('is-choosing');
+  chooser.classList.remove('hidden');
+  const firstOption = options.querySelector('button');
+  if (firstOption) firstOption.focus({ preventScroll: true });
+}
+
+function populateQualityControl(match, qualityId) {
+  const controls = document.getElementById('quality-controls');
+  const select = document.getElementById('quality-select');
+  select.replaceChildren();
+
+  const autoOption = document.createElement('option');
+  autoOption.value = 'auto';
+  autoOption.textContent = 'Auto';
+  select.appendChild(autoOption);
+  for (const variant of match.qualityOptions) {
+    const option = document.createElement('option');
+    option.value = variant.id;
+    option.textContent = variant.label;
+    select.appendChild(option);
+  }
+  select.value = qualityId;
+  controls.classList.remove('hidden');
+  controls.classList.add('flex');
+}
+
+function getQualityVariant(match, qualityId) {
+  if (!match || qualityId === 'auto') return null;
+  return match.qualityOptions.find((variant) => variant.id === qualityId) || null;
+}
+
+function manualPlaybackSources(match, variant, nativeHls) {
+  if (nativeHls) return variant.sources;
+  return variant.sources.map((source) => (
+    match.masterSources.find((master) => master.cdn === source.cdn)
+  )).filter(Boolean);
+}
+
+function startPlayback(match, qualityId, shouldAutoplay) {
+  if (!match || match !== activeMatch) return;
+  const video = document.getElementById('video');
+  const select = document.getElementById('quality-select');
+  const variant = getQualityVariant(match, qualityId);
+
+  if (qualityId !== 'auto' && !variant) {
+    showPlayerMessage('Selected quality is no longer available. Switching to Auto…');
+    qualityId = 'auto';
+  }
+
+  const manualSelection = qualityId !== 'auto';
+  selectedQualityId = qualityId;
+  if (select.options.length) select.value = qualityId;
+  setAutoQualityLabel(null);
+  setQualityControlLoading(true);
+  showPlayerMessage(manualSelection ? 'Loading selected quality…' : 'Loading stream…');
+
+  const selectedVariant = getQualityVariant(match, qualityId);
+  const nativeHls = usesNativeHls(video);
+  const sources = selectedVariant
+    ? manualPlaybackSources(match, selectedVariant, nativeHls)
+    : (match.streamUrls || [match.streamUrl]);
+
+  playHls(video, sources, {
+    variant: selectedVariant,
+    shouldAutoplay,
+    resumeAtLiveEdge: nativeHls && selectedQualityId !== null,
+    onSourceAttempt: () => {
+      if (qualityId === 'auto' && selectedQualityId === 'auto') setAutoQualityLabel(null);
+    },
+    onRetry: () => {
+      if (match === activeMatch && qualityId === selectedQualityId) setQualityControlLoading(true);
+    },
+    onReady: () => {
+      if (match !== activeMatch || qualityId !== selectedQualityId) return;
+      setQualityControlLoading(false);
+      hidePlayerMessage();
+    },
+    onLevelSwitched: (level) => {
+      if (qualityId !== 'auto' || selectedQualityId !== 'auto') return;
+      setAutoQualityLabel(level && level.height);
+    },
+    onExhausted: () => {
+      if (match !== activeMatch || qualityId !== selectedQualityId) return;
+      if (qualityId !== 'auto') {
+        selectedQualityId = 'auto';
+        if (select.options.length) select.value = 'auto';
+        setAutoQualityLabel(null);
+        showPlayerMessage('Selected quality unavailable. Switching to Auto…');
+        playbackRetryTimerId = setTimeout(() => {
+          playbackRetryTimerId = null;
+          if (match === activeMatch && selectedQualityId === 'auto') {
+            startPlayback(match, 'auto', shouldAutoplay);
+          }
+        }, NATIVE_RETRY_DELAY_MS);
+        return;
+      }
+      setQualityControlLoading(false);
+      showPlayerMessage('Unable to play this stream on your device. Please try again later.');
+    },
+  });
+}
+
+function chooseQuality(qualityId) {
+  if (!activeMatch) return;
+  const variant = getQualityVariant(activeMatch, qualityId);
+  if (qualityId !== 'auto' && !variant) return;
+
+  const video = document.getElementById('video');
+  const wasPlaying = selectedQualityId === null || (!video.paused && !video.ended);
+  const chooser = document.getElementById('quality-chooser');
+  const shell = document.getElementById('video-shell');
+
+  if (qualityId === 'auto' && window.__hls) {
+    window.__hls.currentLevel = -1;
+  }
+
+  chooser.classList.add('hidden');
+  shell.classList.remove('is-choosing');
+  populateQualityControl(activeMatch, qualityId);
+  startPlayback(activeMatch, qualityId, wasPlaying);
+}
+
+function openPlayer(match) {
+  if (isLoadingStream) return;
+
+  const modal = document.getElementById('player-modal');
+  const video = document.getElementById('video');
+  const title = document.getElementById('player-title');
+  const message = document.getElementById('player-message');
+
+  previouslyFocusedElement = document.activeElement;
+  resetVideo(video);
+  resetQualityUi();
+  activeMatch = match;
+  selectedQualityId = null;
+
+  title.textContent = match.title;
+  modal.classList.remove('hidden');
+  modal.classList.add('flex');
+  document.body.classList.add('overflow-hidden');
+
+  if (match.poster) video.poster = match.poster;
+
+  if (!match.streamUrl) {
+    message.textContent = 'Stream not yet available for this event.';
+    message.classList.remove('hidden');
+    document.getElementById('close-player').focus({ preventScroll: true });
+    return;
+  }
+
+  message.classList.add('hidden');
+  if (match.qualityOptions.length >= 2) {
+    renderQualityChooser(match);
+    return;
+  }
+
+  selectedQualityId = 'auto';
+  startPlayback(match, 'auto', true);
+}
+
+function closePlayer() {
+  const modal = document.getElementById('player-modal');
+  modal.classList.add('hidden');
+  modal.classList.remove('flex');
+  document.body.classList.remove('overflow-hidden');
+  resetVideo(document.getElementById('video'));
+  resetQualityUi();
+  activeMatch = null;
+  selectedQualityId = null;
+  isLoadingStream = false;
+  if (previouslyFocusedElement && previouslyFocusedElement.isConnected) {
+    previouslyFocusedElement.focus({ preventScroll: true });
+  }
+  previouslyFocusedElement = null;
+}
+
 /* ─── Event Delegation ─── */
 
 function handleGridClick(e) {
@@ -604,7 +1111,19 @@ function handleModalBackdrop(e) {
 }
 
 function handleKeyDown(e) {
-  if (e.key === 'Escape') closePlayer();
+  const modal = document.getElementById('player-modal');
+  if (e.key === 'Escape' && !modal.classList.contains('hidden')) closePlayer();
+}
+
+function handleQualityChoice(e) {
+  const button = e.target.closest('[data-quality-id]');
+  if (!button) return;
+  chooseQuality(button.dataset.qualityId);
+}
+
+function handleQualityChange(e) {
+  if (!activeMatch || e.target.disabled || e.target.value === selectedQualityId) return;
+  chooseQuality(e.target.value);
 }
 
 /* ─── Init ─── */
@@ -634,6 +1153,8 @@ async function init() {
   // Modal interactions
   document.getElementById('player-modal').addEventListener('click', handleModalBackdrop);
   document.getElementById('close-player').addEventListener('click', closePlayer);
+  document.getElementById('quality-options').addEventListener('click', handleQualityChoice);
+  document.getElementById('quality-select').addEventListener('change', handleQualityChange);
   document.addEventListener('keydown', handleKeyDown);
 
   try {
