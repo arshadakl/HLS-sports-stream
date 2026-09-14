@@ -1061,12 +1061,74 @@ function hidePosterOverlay() {
   if (overlay) overlay.classList.add('hidden');
 }
 
+function hideUpcomingView() {
+  const view = document.getElementById('upcoming-view');
+  if (view) view.classList.add('hidden');
+}
+
+function showUpcomingView() {
+  const view = document.getElementById('upcoming-view');
+  if (view) view.classList.remove('hidden');
+}
+
+function setText(id, text) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = text || '';
+}
+
+const UPCOMING_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const UPCOMING_WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+function formatUpcomingStart(match) {
+  // Prefer the parsed timestamp (IST); fall back to the raw string.
+  let ts = match.startTimeMs;
+  if (typeof ts !== 'number' || ts <= 0) {
+    ts = parseFancodeTime(match.startTime);
+  }
+  if (!ts) return 'Starts soon';
+
+  const now = Date.now();
+  const diffMs = ts - now;
+  const absDiff = Math.abs(diffMs);
+  const minutes = Math.round(absDiff / 60000);
+  const hours = Math.round(absDiff / 3600000);
+  const days = Math.floor(absDiff / 86400000);
+
+  if (diffMs > 0 && minutes < 60) return `Starts in ${minutes} min`;
+  if (diffMs > 0 && hours < 24) return `Starts in ${hours} hr`;
+  if (diffMs > 0 && days < 7) return `Starts in ${days} day${days === 1 ? '' : 's'}`;
+
+  // Past or far future — show the absolute date/time.
+  const d = new Date(ts);
+  const wd = UPCOMING_WEEKDAYS[d.getUTCDay()];
+  const day = d.getUTCDate();
+  const mon = UPCOMING_MONTHS[d.getUTCMonth()];
+  const hh = String(d.getUTCHours()).padStart(2, '0');
+  const mm = String(d.getUTCMinutes()).padStart(2, '0');
+  const prefix = diffMs > 0 ? 'Starts' : 'Started';
+  return `${prefix} ${wd} ${day} ${mon} · ${hh}:${mm} IST`;
+}
+
+function renderUpcomingView(match) {
+  const poster = document.getElementById('upcoming-poster');
+  if (poster) {
+    poster.src = match.poster || '';
+    poster.alt = match.title || '';
+  }
+  setText('upcoming-competition', match.competition || match.category || '');
+  setText('upcoming-title', match.title || '');
+  const matchup = (match.team1 && match.team2)
+    ? `${match.team1} vs ${match.team2}`
+    : (match.channel || '');
+  setText('upcoming-matchup', matchup);
+  setText('upcoming-start', formatUpcomingStart(match));
+}
+
 function openPlayer(match) {
   if (isLoadingStream) return;
 
   const modal = document.getElementById('player-modal');
   const video = document.getElementById('video');
-  const shell = document.getElementById('video-shell');
   const title = document.getElementById('player-title');
   const message = document.getElementById('player-message');
 
@@ -1083,21 +1145,25 @@ function openPlayer(match) {
 
   if (match.poster) video.poster = match.poster;
 
-  // Upcoming matches: show only the poster image — no video element,
-  // no controls, no stream loading, no "stream not available" message.
+  // Upcoming matches: hide the <video> element entirely and show a
+  // poster-driven "Coming Soon" view — no player chrome, no controls,
+  // no loading state, no "stream not available" text.
   if (!match.isLive) {
     video.removeAttribute('controls');
     video.style.display = 'none';
     hidePlayerMessage();
-    showPosterOverlay(shell, match.poster);
+    hidePosterOverlay();
+    renderUpcomingView(match);
+    showUpcomingView();
     document.getElementById('close-player').focus({ preventScroll: true });
     return;
   }
 
-  // Live matches: restore video element, hide any leftover poster overlay.
+  // Live matches: restore the video element, hide the upcoming view.
   video.style.display = '';
   video.setAttribute('controls', '');
   hidePosterOverlay();
+  hideUpcomingView();
 
   if (!match.streamUrl) {
     message.textContent = 'Stream not yet available for this event.';
@@ -1127,6 +1193,7 @@ function closePlayer() {
   video.style.display = '';
   video.setAttribute('controls', '');
   hidePosterOverlay();
+  hideUpcomingView();
   activeMatch = null;
   selectedQualityId = null;
   isLoadingStream = false;
