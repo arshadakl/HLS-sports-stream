@@ -1042,11 +1042,31 @@ function chooseQuality(qualityId) {
   startPlayback(activeMatch, qualityId, wasPlaying);
 }
 
+function showPosterOverlay(shell, posterSrc) {
+  let overlay = document.getElementById('poster-overlay');
+  if (!overlay) {
+    overlay = document.createElement('img');
+    overlay.id = 'poster-overlay';
+    overlay.className = 'absolute inset-0 w-full h-full object-contain bg-black';
+    overlay.referrerPolicy = 'no-referrer';
+    overlay.alt = '';
+    shell.appendChild(overlay);
+  }
+  overlay.src = posterSrc || '';
+  overlay.classList.remove('hidden');
+}
+
+function hidePosterOverlay() {
+  const overlay = document.getElementById('poster-overlay');
+  if (overlay) overlay.classList.add('hidden');
+}
+
 function openPlayer(match) {
   if (isLoadingStream) return;
 
   const modal = document.getElementById('player-modal');
   const video = document.getElementById('video');
+  const shell = document.getElementById('video-shell');
   const title = document.getElementById('player-title');
   const message = document.getElementById('player-message');
 
@@ -1062,6 +1082,22 @@ function openPlayer(match) {
   document.body.classList.add('overflow-hidden');
 
   if (match.poster) video.poster = match.poster;
+
+  // Upcoming matches: show only the poster image — no video element,
+  // no controls, no stream loading, no "stream not available" message.
+  if (!match.isLive) {
+    video.removeAttribute('controls');
+    video.style.display = 'none';
+    hidePlayerMessage();
+    showPosterOverlay(shell, match.poster);
+    document.getElementById('close-player').focus({ preventScroll: true });
+    return;
+  }
+
+  // Live matches: restore video element, hide any leftover poster overlay.
+  video.style.display = '';
+  video.setAttribute('controls', '');
+  hidePosterOverlay();
 
   if (!match.streamUrl) {
     message.textContent = 'Stream not yet available for this event.';
@@ -1085,8 +1121,12 @@ function closePlayer() {
   modal.classList.add('hidden');
   modal.classList.remove('flex');
   document.body.classList.remove('overflow-hidden');
-  resetVideo(document.getElementById('video'));
+  const video = document.getElementById('video');
+  resetVideo(video);
   resetQualityUi();
+  video.style.display = '';
+  video.setAttribute('controls', '');
+  hidePosterOverlay();
   activeMatch = null;
   selectedQualityId = null;
   isLoadingStream = false;
